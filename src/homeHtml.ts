@@ -105,6 +105,39 @@ export const blogHomeHtml = `<!doctype html>
         color: var(--muted);
         font-size: 12px;
       }
+      .field-stack {
+        display: grid;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .field-label {
+        font-size: 13px;
+        color: #374151;
+        font-weight: 600;
+      }
+      .field-help {
+        margin-top: -2px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .security-note {
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .unlock-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 9px;
+        border-radius: 999px;
+        background: #ecfdf5;
+        color: #166534;
+        border: 1px solid #bbf7d0;
+        font-size: 12px;
+        margin-bottom: 10px;
+      }
       .input, .textarea {
         width: 100%;
         border-radius: 16px;
@@ -599,11 +632,25 @@ export const blogHomeHtml = `<!doctype html>
               <h1 class="login-title">登录到我的笔记</h1>
             </div>
           </div>
-          <p class="login-desc">输入访问密码后即可查看、搜索、复制和管理你的私人笔记。</p>
-          <input id="passwordInput" class="input" type="password" placeholder="输入登录密码" />
-          <div class="login-actions">
-            <button id="loginBtn" class="btn login-submit">进入笔记</button>
+          <div id="unlockBadge" class="unlock-badge hidden">✓ 已通过访问验证，只需输入本地解锁密钥</div>
+          <p id="loginDesc" class="login-desc">输入访问密码和本地解锁密钥后即可查看、搜索、复制和管理你的私人笔记。</p>
+
+          <div id="accessFieldGroup" class="field-stack">
+            <label class="field-label" for="passwordInput">访问密码</label>
+            <input id="passwordInput" class="input" type="password" placeholder="输入访问密码" />
+            <div class="field-help">用于访问站点和 API。</div>
           </div>
+
+          <div class="field-stack">
+            <label class="field-label" for="vaultPasswordInput">本地解锁密钥</label>
+            <input id="vaultPasswordInput" class="input" type="password" placeholder="输入本地解锁密钥" />
+            <div class="field-help">只在浏览器本地使用，不会发送到服务器。</div>
+          </div>
+
+          <div class="login-actions">
+            <button id="loginBtn" class="btn login-submit">解锁并进入笔记</button>
+          </div>
+          <div class="security-note">端到端加密开启后，服务器只保存密文；搜索会在本地浏览器里完成。</div>
           <div id="loginStatus" class="login-foot"></div>
         </div>
       </section>
@@ -612,7 +659,7 @@ export const blogHomeHtml = `<!doctype html>
         <header class="card topbar">
           <div>
             <h1 class="topbar-title">我的笔记</h1>
-            <div class="topbar-subtitle">简单记录，随手保存，随手搜索。</div>
+            <div class="topbar-subtitle">端到端加密 · 本地解锁 · 本地搜索</div>
           </div>
           <div class="topbar-actions">
             <div class="search-wrap">
@@ -666,16 +713,25 @@ export const blogHomeHtml = `<!doctype html>
     <script>
       const state = {
         notes: [],
+        allNotes: [],
         editingId: null,
         expandedIds: new Set(),
         searchTimer: null,
-        statusTimer: null
+        statusTimer: null,
+        sessionAuthenticated: false,
+        vaultUnlocked: false,
+        vaultKey: null,
+        vaultSalt: ''
       };
 
       const els = {
         loginView: document.getElementById('loginView'),
         appView: document.getElementById('appView'),
+        unlockBadge: document.getElementById('unlockBadge'),
+        loginDesc: document.getElementById('loginDesc'),
+        accessFieldGroup: document.getElementById('accessFieldGroup'),
         passwordInput: document.getElementById('passwordInput'),
+        vaultPasswordInput: document.getElementById('vaultPasswordInput'),
         loginBtn: document.getElementById('loginBtn'),
         loginStatus: document.getElementById('loginStatus'),
         searchInput: document.getElementById('searchInput'),
@@ -721,9 +777,139 @@ export const blogHomeHtml = `<!doctype html>
         els.fabTopBtn.classList.toggle('show', shouldShow);
       }
 
+      function updateLoginMode() {
+        const unlockOnly = state.sessionAuthenticated && !state.vaultUnlocked;
+        els.unlockBadge.classList.toggle('hidden', !unlockOnly);
+        els.accessFieldGroup.classList.toggle('hidden', unlockOnly);
+        els.passwordInput.value = unlockOnly ? '' : els.passwordInput.value;
+        els.loginDesc.textContent = unlockOnly
+          ? '请输入本地解锁密钥，浏览器会在本地解密你的笔记。'
+          : '输入访问密码和本地解锁密钥后即可查看、搜索、复制和管理你的私人笔记。';
+        els.loginBtn.textContent = unlockOnly ? '解锁我的笔记' : '解锁并进入笔记';
+      }
+
+      function bytesToBase64(bytes) {
+        let binary = '';
+        const chunkSize = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          const chunk = bytes.subarray(i, i + chunkSize);
+          binary += String.fromCharCode.apply(null, chunk);
+        }
+        return btoa(binary);
+      }
+
+      function base64ToBytes(base64) {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes;
+      }
+
+      async function getCryptoConfig() {
+        const data = await api('/api/crypto-config');
+        state.vaultSalt = data.vaultSalt;
+        return data;
+      }
+
+      async function deriveVaultKey(passphrase, saltBase64) {
+        const salt = base64ToBytes(saltBase64);
+        const keyMaterial = await crypto.subtle.importKey(
+          'raw',
+          new TextEncoder().encode(passphrase),
+          'PBKDF2',
+          false,
+          ['deriveKey']
+        );
+
+        return crypto.subtle.deriveKey(
+          {
+            name: 'PBKDF2',
+            salt: salt,
+            iterations: 250000,
+            hash: 'SHA-256'
+          },
+          keyMaterial,
+          { name: 'AES-GCM', length: 256 },
+          false,
+          ['encrypt', 'decrypt']
+        );
+      }
+
+      function isEncryptedValue(value) {
+        return typeof value === 'string' && value.startsWith('enc:v1:');
+      }
+
+      async function encryptValue(value) {
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const cipher = await crypto.subtle.encrypt(
+          { name: 'AES-GCM', iv: iv },
+          state.vaultKey,
+          new TextEncoder().encode(value || '')
+        );
+
+        return 'enc:v1:' + btoa(JSON.stringify({
+          iv: bytesToBase64(iv),
+          data: bytesToBase64(new Uint8Array(cipher))
+        }));
+      }
+
+      async function decryptValue(value) {
+        if (!isEncryptedValue(value)) return value || '';
+
+        const payload = JSON.parse(atob(value.slice(7)));
+        const plain = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: base64ToBytes(payload.iv) },
+          state.vaultKey,
+          base64ToBytes(payload.data)
+        );
+
+        return new TextDecoder().decode(plain);
+      }
+
+      async function decryptNotes(rawNotes) {
+        const decrypted = [];
+        let encryptedCount = 0;
+        let failedCount = 0;
+
+        for (const note of rawNotes) {
+          try {
+            const encrypted = isEncryptedValue(note.title) || isEncryptedValue(note.content);
+            if (encrypted) encryptedCount += 1;
+
+            decrypted.push({
+              id: note.id,
+              title: await decryptValue(note.title),
+              content: await decryptValue(note.content),
+              created_at: note.created_at,
+              updated_at: note.updated_at,
+              encrypted: encrypted
+            });
+          } catch (error) {
+            failedCount += 1;
+          }
+        }
+
+        if (encryptedCount > 0 && failedCount === encryptedCount) {
+          throw new Error('本地解锁密钥不正确');
+        }
+
+        return decrypted;
+      }
+
+      function filterNotes(notes, query) {
+        const q = (query || '').trim().toLowerCase();
+        if (!q) return notes;
+        return notes.filter(function (note) {
+          return (note.title || '').toLowerCase().includes(q) || (note.content || '').toLowerCase().includes(q);
+        });
+      }
+
       function showLogin() {
         els.loginView.classList.remove('hidden');
         els.appView.classList.add('hidden');
+        updateLoginMode();
       }
 
       function showApp() {
@@ -803,6 +989,9 @@ export const blogHomeHtml = `<!doctype html>
         const res = await fetch(url, options);
         const data = await res.json().catch(function () { return {}; });
         if (res.status === 401) {
+          state.sessionAuthenticated = false;
+          state.vaultUnlocked = false;
+          state.vaultKey = null;
           showLogin();
           throw new Error('请先登录');
         }
@@ -928,10 +1117,17 @@ export const blogHomeHtml = `<!doctype html>
       }
 
       async function refreshNotes() {
+        if (!state.vaultUnlocked) {
+          state.notes = [];
+          state.allNotes = [];
+          renderList();
+          return;
+        }
+
         const q = els.searchInput.value.trim();
-        const query = q ? '?q=' + encodeURIComponent(q) : '';
-        const data = await api('/api/notes' + query);
-        state.notes = data.notes || [];
+        const data = await api('/api/notes');
+        state.allNotes = await decryptNotes(data.notes || []);
+        state.notes = filterNotes(state.allNotes, q);
         state.expandedIds.forEach(function (id) {
           if (!state.notes.find(function (note) { return note.id === id; })) {
             state.expandedIds.delete(id);
@@ -961,21 +1157,28 @@ export const blogHomeHtml = `<!doctype html>
           setStatus('标题和内容至少写一个');
           return;
         }
+        if (!state.vaultUnlocked || !state.vaultKey) {
+          setStatus('请先输入本地解锁密钥');
+          return;
+        }
 
         setStatus('保存中…');
+
+        const encryptedTitle = await encryptValue(title);
+        const encryptedContent = await encryptValue(content);
 
         let data;
         if (state.editingId) {
           data = await api('/api/notes/' + encodeURIComponent(state.editingId), {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ title: title, content: content })
+            body: JSON.stringify({ title: encryptedTitle, content: encryptedContent })
           });
         } else {
           data = await api('/api/notes', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ title: title, content: content })
+            body: JSON.stringify({ title: encryptedTitle, content: encryptedContent })
           });
         }
 
@@ -999,12 +1202,28 @@ export const blogHomeHtml = `<!doctype html>
         setStatus('已删除');
       }
 
+      async function unlockVault(passphrase) {
+        if (!passphrase) {
+          throw new Error('请输入本地解锁密钥');
+        }
+
+        const config = await getCryptoConfig();
+        state.vaultKey = await deriveVaultKey(passphrase, config.vaultSalt);
+        state.vaultUnlocked = true;
+        await refreshNotes();
+      }
+
       async function checkSession() {
         const data = await api('/api/session');
         if (data.authenticated) {
-          showApp();
-          await refreshNotes();
+          state.sessionAuthenticated = true;
+          state.vaultUnlocked = false;
+          state.vaultKey = null;
+          showLogin();
         } else {
+          state.sessionAuthenticated = false;
+          state.vaultUnlocked = false;
+          state.vaultKey = null;
           showLogin();
         }
       }
@@ -1012,22 +1231,33 @@ export const blogHomeHtml = `<!doctype html>
       els.loginBtn.onclick = async function () {
         try {
           els.loginStatus.textContent = '登录中…';
-          await api('/api/login', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ password: els.passwordInput.value })
-          });
-          els.passwordInput.value = '';
+          if (!state.sessionAuthenticated) {
+            await api('/api/login', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ password: els.passwordInput.value })
+            });
+            state.sessionAuthenticated = true;
+            els.passwordInput.value = '';
+          }
+
+          await unlockVault(els.vaultPasswordInput.value);
+          els.vaultPasswordInput.value = '';
           els.loginStatus.textContent = '';
           showApp();
-          await refreshNotes();
+          setStatus('已解锁本地密文');
         } catch (error) {
+          state.vaultUnlocked = false;
+          state.vaultKey = null;
+          showLogin();
           els.loginStatus.textContent = error.message || '登录失败';
         }
       };
 
-      els.passwordInput.addEventListener('keydown', function (event) {
-        if (event.key === 'Enter') els.loginBtn.click();
+      [els.passwordInput, els.vaultPasswordInput].forEach(function (input) {
+        input.addEventListener('keydown', function (event) {
+          if (event.key === 'Enter') els.loginBtn.click();
+        });
       });
 
       els.searchBtn.onclick = function () {
@@ -1073,6 +1303,11 @@ export const blogHomeHtml = `<!doctype html>
       els.logoutBtn.onclick = async function () {
         await api('/api/logout', { method: 'POST' });
         state.notes = [];
+        state.allNotes = [];
+        state.sessionAuthenticated = false;
+        state.vaultUnlocked = false;
+        state.vaultKey = null;
+        els.vaultPasswordInput.value = '';
         showLogin();
         setStatus('');
       };

@@ -66,31 +66,13 @@ function unauthorized() {
 	return json({ ok: false, error: 'unauthorized' }, 401);
 }
 
-async function listNotes(env: AppEnv, q: string) {
-	const keyword = q.trim();
-
-	if (!keyword) {
-		const result = await env.DB.prepare(
-			`SELECT id, title, content, created_at, updated_at
-			 FROM notes
-			 ORDER BY updated_at DESC
-			 LIMIT 50`
-		).all<Note>();
-
-		return result.results ?? [];
-	}
-
-	const likePattern = `%${keyword.replace(/([%_\\])/g, '\\$1')}%`;
+async function listNotes(env: AppEnv) {
 	const result = await env.DB.prepare(
 		`SELECT id, title, content, created_at, updated_at
 		 FROM notes
-		 WHERE title LIKE ? ESCAPE '\\'
-		    OR content LIKE ? ESCAPE '\\'
 		 ORDER BY updated_at DESC
-		 LIMIT 50`
-	)
-		.bind(likePattern, likePattern)
-		.all<Note>();
+		 LIMIT 1000`
+	).all<Note>();
 
 	return result.results ?? [];
 }
@@ -104,6 +86,55 @@ async function getNote(env: AppEnv, id: string) {
 	)
 		.bind(id)
 		.first<Note>();
+}
+
+async function ensureAppMetaTable(env: AppEnv) {
+	await env.DB.prepare(
+		`CREATE TABLE IF NOT EXISTS app_meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)`
+	).run();
+}
+
+async function getMeta(env: AppEnv, key: string) {
+	const row = await env.DB.prepare(
+		`SELECT value FROM app_meta WHERE key = ? LIMIT 1`
+	)
+		.bind(key)
+		.first<{ value: string }>();
+
+	return row?.value ?? null;
+}
+
+async function setMeta(env: AppEnv, key: string, value: string) {
+	await env.DB.prepare(
+		`INSERT INTO app_meta (key, value)
+		 VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+	)
+		.bind(key, value)
+		.run();
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+	let binary = '';
+	const chunkSize = 0x8000;
+	for (let i = 0; i < bytes.length; i += chunkSize) {
+		const chunk = bytes.subarray(i, i + chunkSize);
+		binary += String.fromCharCode(...chunk);
+	}
+	return btoa(binary);
+}
+
+async function getOrCreateVaultSalt(env: AppEnv) {
+	await ensureAppMetaTable(env);
+	const existing = await getMeta(env, 'vault_salt');
+	if (existing) return existing;
+
+	const salt = bytesToBase64(crypto.getRandomValues(new Uint8Array(16)));
+	await setMeta(env, 'vault_salt', salt);
+	return salt;
 }
 
 const appIconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
@@ -960,10 +991,21 @@ export default {
 			return unauthorized();
 		}
 
+		if (url.pathname === '/api/crypto-config' && request.method === 'GET') {
+			return json({
+				ok: true,
+				vaultSalt: await getOrCreateVaultSalt(env),
+				cipher: 'aes-gcm-256',
+				kdf: 'pbkdf2-sha256',
+				iterations: 250000,
+				version: 1,
+			});
+		}
+
 		if (url.pathname === '/api/notes' && request.method === 'GET') {
 			return json({
 				ok: true,
-				notes: await listNotes(env, url.searchParams.get('q') || ''),
+				notes: await listNotes(env),
 			});
 		}
 
