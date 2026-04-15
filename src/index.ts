@@ -1041,10 +1041,6 @@ export default {
 			);
 		}
 
-		if (url.pathname.startsWith('/api/') && !(await isAuthed(request, env))) {
-			return unauthorized();
-		}
-
 		if (url.pathname === '/api/crypto-config' && request.method === 'GET') {
 			return json({
 				ok: true,
@@ -1054,6 +1050,10 @@ export default {
 				iterations: 250000,
 				version: 1,
 			});
+		}
+
+		if (url.pathname.startsWith('/api/') && !(await isAuthed(request, env))) {
+			return unauthorized();
 		}
 
 		if (url.pathname === '/api/notes' && request.method === 'GET') {

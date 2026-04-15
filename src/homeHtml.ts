@@ -1070,7 +1070,7 @@ export const blogHomeHtml = `<!doctype html>
       }
 
       async function api(url, options) {
-        const res = await fetch(url, options);
+        const res = await fetch(url, Object.assign({ credentials: 'same-origin' }, options || {}));
         const data = await res.json().catch(function () { return {}; });
         if (res.status === 401) {
           state.sessionAuthenticated = false;
