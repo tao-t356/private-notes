@@ -1330,6 +1330,28 @@ export const blogHomeHtml = `<!doctype html>
             }
           }
         } else {
+          const cachedPassphrase = readSessionPassphrase();
+          if (cachedPassphrase) {
+            try {
+              await api('/api/login', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ password: cachedPassphrase })
+              });
+              state.sessionAuthenticated = true;
+              state.vaultUnlocked = false;
+              state.vaultKey = null;
+              state.unlockError = '';
+              showApp();
+              await refreshMeta();
+              await unlockVault(cachedPassphrase);
+              setStatus('已自动登录并恢复解锁');
+              return;
+            } catch (error) {
+              clearSessionPassphrase();
+            }
+          }
+
           state.sessionAuthenticated = false;
           state.vaultUnlocked = false;
           state.vaultKey = null;

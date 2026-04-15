@@ -97,6 +97,59 @@ async function ensureAppMetaTable(env: AppEnv) {
 	).run();
 }
 
+let schemaEnsured = false;
+
+async function ensureNotesSchema(env: AppEnv) {
+	if (schemaEnsured) return;
+
+	await env.DB.prepare(
+		`CREATE TABLE IF NOT EXISTS notes (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			content TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`
+	).run();
+
+	await env.DB.prepare(
+		`CREATE INDEX IF NOT EXISTS idx_notes_updated_at
+		 ON notes(updated_at DESC)`
+	).run();
+
+	await env.DB.prepare(
+		`CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+			id UNINDEXED,
+			title,
+			content
+		)`
+	).run();
+
+	await env.DB.prepare(
+		`CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes BEGIN
+			INSERT INTO notes_fts (id, title, content)
+			VALUES (new.id, new.title, new.content);
+		END`
+	).run();
+
+	await env.DB.prepare(
+		`CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
+			DELETE FROM notes_fts WHERE id = old.id;
+			INSERT INTO notes_fts (id, title, content)
+			VALUES (new.id, new.title, new.content);
+		END`
+	).run();
+
+	await env.DB.prepare(
+		`CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes BEGIN
+			DELETE FROM notes_fts WHERE id = old.id;
+		END`
+	).run();
+
+	await ensureAppMetaTable(env);
+	schemaEnsured = true;
+}
+
 async function getMeta(env: AppEnv, key: string) {
 	const row = await env.DB.prepare(
 		`SELECT value FROM app_meta WHERE key = ? LIMIT 1`
@@ -128,7 +181,7 @@ function bytesToBase64(bytes: Uint8Array) {
 }
 
 async function getOrCreateVaultSalt(env: AppEnv) {
-	await ensureAppMetaTable(env);
+	await ensureNotesSchema(env);
 	const existing = await getMeta(env, 'vault_salt');
 	if (existing) return existing;
 
@@ -943,6 +996,7 @@ export default {
 		}
 
 		if (url.pathname === '/api/health' && request.method === 'GET') {
+			await ensureNotesSchema(env);
 			const result = await env.DB.prepare('SELECT COUNT(*) AS note_count FROM notes').first<{
 				note_count: number;
 			}>();
@@ -1003,6 +1057,7 @@ export default {
 		}
 
 		if (url.pathname === '/api/notes' && request.method === 'GET') {
+			await ensureNotesSchema(env);
 			return json({
 				ok: true,
 				notes: await listNotes(env),
@@ -1010,11 +1065,13 @@ export default {
 		}
 
 		if (url.pathname === '/api/reset-encrypted-notes' && request.method === 'DELETE') {
+			await ensureNotesSchema(env);
 			await env.DB.prepare('DELETE FROM notes').run();
 			return json({ ok: true });
 		}
 
 		if (url.pathname === '/api/notes' && request.method === 'POST') {
+			await ensureNotesSchema(env);
 			const body = (await request.json().catch(() => null)) as
 				| { title?: string; content?: string }
 				| null;
@@ -1046,6 +1103,7 @@ export default {
 		}
 
 		if (url.pathname.startsWith('/api/notes/')) {
+			await ensureNotesSchema(env);
 			const id = decodeURIComponent(url.pathname.slice('/api/notes/'.length));
 			if (!id) return json({ ok: false, error: 'missing id' }, 400);
 
