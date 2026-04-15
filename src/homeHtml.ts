@@ -754,6 +754,7 @@ export const blogHomeHtml = `<!doctype html>
         noteCountMeta: 0,
         unlockError: ''
       };
+      const SESSION_KEY = 'private-notes-passphrase';
 
       const els = {
         loginView: document.getElementById('loginView'),
@@ -851,6 +852,26 @@ export const blogHomeHtml = `<!doctype html>
           bytes[i] = binary.charCodeAt(i);
         }
         return bytes;
+      }
+
+      function storeSessionPassphrase(passphrase) {
+        try {
+          sessionStorage.setItem(SESSION_KEY, passphrase);
+        } catch (error) {}
+      }
+
+      function readSessionPassphrase() {
+        try {
+          return sessionStorage.getItem(SESSION_KEY) || '';
+        } catch (error) {
+          return '';
+        }
+      }
+
+      function clearSessionPassphrase() {
+        try {
+          sessionStorage.removeItem(SESSION_KEY);
+        } catch (error) {}
       }
 
       async function getCryptoConfig() {
@@ -1273,6 +1294,7 @@ export const blogHomeHtml = `<!doctype html>
         state.vaultKey = await deriveVaultKey(passphrase, config.vaultSalt);
         state.vaultUnlocked = true;
         state.unlockError = '';
+        storeSessionPassphrase(passphrase);
         await refreshNotes();
       }
 
@@ -1294,11 +1316,25 @@ export const blogHomeHtml = `<!doctype html>
           state.unlockError = '';
           showApp();
           await refreshMeta();
+          const cachedPassphrase = readSessionPassphrase();
+          if (cachedPassphrase) {
+            try {
+              await unlockVault(cachedPassphrase);
+              setStatus('已自动恢复解锁状态');
+            } catch (error) {
+              clearSessionPassphrase();
+              state.vaultUnlocked = false;
+              state.vaultKey = null;
+              state.unlockError = '自动解锁失败，请重新输入密码';
+              updateVaultUi();
+            }
+          }
         } else {
           state.sessionAuthenticated = false;
           state.vaultUnlocked = false;
           state.vaultKey = null;
           state.unlockError = '';
+          clearSessionPassphrase();
           showLogin();
         }
       }
@@ -1326,6 +1362,7 @@ export const blogHomeHtml = `<!doctype html>
             state.unlockError = '当前密码无法解锁现有加密笔记';
             showApp();
             await refreshMeta();
+            clearSessionPassphrase();
           } else {
             showLogin();
           }
@@ -1403,6 +1440,7 @@ export const blogHomeHtml = `<!doctype html>
             state.vaultUnlocked = false;
             state.vaultKey = null;
             state.unlockError = '';
+            clearSessionPassphrase();
             els.vaultUnlockInput.value = '';
             els.passwordInput.value = '';
             updateVaultUi();
@@ -1429,6 +1467,7 @@ export const blogHomeHtml = `<!doctype html>
         els.vaultUnlockInput.value = '';
         els.passwordInput.value = '';
         state.unlockError = '';
+        clearSessionPassphrase();
         showLogin();
         setStatus('');
       };
