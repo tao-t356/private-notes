@@ -8,6 +8,7 @@
 - D1 保存密文、时间戳和登录限流状态；API 把单调的 `updated_at` 作为 revision token
 - 搜索、解密和筛选都在当前浏览器内完成
 - 支持多密码进入相互隔离的 vault
+- 支持带有效期的一次性加密分享，收件人主动查看后从当前在线 D1 原子删除记录
 
 ## 安全模型
 
@@ -17,7 +18,22 @@
 - Worker Secret 中仍保存访问密码，因此 Worker/部署管理员属于可信边界。
 - 原始 D1 数据泄露时，标题和正文默认是密文；新 API 拒绝写入明文。
 - 解密密钥只保存在当前页面内存，不写入 `localStorage`。
+- 未配置 `COOKIE_SECRET` 时，Worker 会在自己的 D1 `app_meta` 中原子生成并保存一段独立的 256 位随机签名密钥；它不会用于解密笔记，也不会返回客户端或写入日志。D1 管理员、备份和 Time Travel 因此仍属于可信边界。
+- 有效的显式 `COOKIE_SECRET` 始终优先，可用于把签名密钥与 D1 分离。切换或轮换签名密钥会让现有 Session 和尚未领取的分享链接失效。
 - 修改 Worker 访问密码会让旧 Session 失效；已有密文仍需要原 vault 密码解锁，直至完成重加密。
+
+一次性分享使用独立的安全边界：
+
+- 浏览器为每个分享生成新的 AES-256-GCM 随机密钥；密钥只放在 URL fragment 中，不会随 HTTP 请求发送给 Worker。
+- 分享创建的是独立加密副本，领取或过期不会删除发送者 vault 中的原笔记。
+- D1 只保存分享密文、过期时间，以及 token/proof 的二次哈希，不保存原始分享 token、proof 或解密密钥。
+- 收件人必须在静态分享页主动点击“查看并销毁”。页面根据 fragment 密钥生成 proof，Worker 使用单条 `DELETE ... RETURNING` 原子取出并删除当前在线记录。
+- 分享 token 带有基于当前部署签名密钥的 HMAC，并签入 proof 哈希；普通 GET、聊天软件链接预览、篡改 token、错误 proof 和非 JSON 请求都不会查询或删除对应的 `note_shares` 记录。
+- “阅后即焚”只保证从当前在线 D1 删除记录并清除当前页面 DOM，无法阻止收件人复制、截图或使用其他设备拍摄。
+- D1 Time Travel、数据库备份或管理员回滚可能恢复已删除记录；恢复后，持有原完整链接的人可能再次领取。因此这不是可验证的物理删除保证。
+- 轮换显式 `COOKIE_SECRET`、删除自动签名密钥，或在两种模式间切换，会使尚未领取的分享链接立即失效；对应密文行会在过期清理时删除。
+- 完整分享链接本身就是访问能力：聊天、邮件或安全扫描服务可能看到包含 fragment 密钥的原始链接文本。任何取得完整链接的人或服务都可以领取、解密并使在线记录失效，因此只应通过可信渠道发送。
+- 领取是 at-most-once：D1 删除成功后若网络响应中断、浏览器关闭或本地解密失败，正常在线流程无法重试。
 
 > 从旧版本升级时，第一次升级后登录必须继续使用旧 `APP_PASSWORD`，让客户端用原加密密码初始化 key-check。初始化成功后可以修改 Worker 访问密码，但必须保留旧 vault 密码；首次使用新访问密码登录时，页面会进入“已认证、待解锁”状态，再输入旧 vault 密码即可解密。删除旧密码前，应先完成全部笔记重加密并保留数据库备份。
 
@@ -29,14 +45,17 @@
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/tao-t356/private-notes)
 
-部署页面会根据 `wrangler.jsonc` 创建并绑定 D1，并要求填写：
+部署页面会根据 `wrangler.jsonc` 创建并绑定 D1，并只要求填写：
 
-- `APP_PASSWORD`：长且唯一的 vault 密码
-- `COOKIE_SECRET`：至少 32 个随机字符，用于签名 Session
+- `APP_PASSWORD`：长且唯一的 vault 密码。建议至少 12 个字符并保存到密码管理器；6 位数字虽然可以登录，但无法抵御数据库泄露后的离线穷举。
 
 如需额外 vault，可在部署后按需添加可选 Secret `APP_PASSWORDS`，格式为 `vault_id=password,guest=another-password`。
 
-新部署必须把所有示例值替换为真实的强密码。运行时会拒绝新的 `APP_PASSWORD` 占位值，以及缺失、过短或仍为示例值的 `COOKIE_SECRET`；为兼容已有密文，旧版本遗留的较短 `APP_PASSWORD` 不会被强制拒绝。
+`COOKIE_SECRET` 不再是首次部署必填项：缺失或保留官方示例值时，Worker 会在当前 D1 中并发安全地生成每个部署独有的随机签名密钥。高级用户仍可在运行时 Variables & Secrets 中添加至少 32 个字符的 `COOKIE_SECRET` 覆盖自动密钥；自定义但不足 32 个字符的值会被拒绝。固定公开默认值是不安全的，因此项目不会内置所有部署共用的签名钥匙。
+
+新部署必须把 `APP_PASSWORD` 示例值替换为自己的密码。为兼容已有密文，旧版本遗留的较短 `APP_PASSWORD` 不会被强制拒绝，但应尽快在完成重加密流程后升级为强口令。
+
+Deploy to Cloudflare 如果使用默认的 `npx wrangler deploy` 而没有执行 migrations，Worker 会在第一次 API 请求时仅对“完全空白”的自动创建 D1 原子建立当前 schema，并同步写入 `d1_migrations` journal。只要发现任意旧表或部分 schema，它就会 fail closed，要求先运行正式 migrations，绝不会猜测升级已有笔记库。
 
 ## 手动部署
 
@@ -48,7 +67,7 @@ npx wrangler login
 npx wrangler d1 create private-notes-db
 ```
 
-把返回的 `database_id` 写入 `wrangler.jsonc`，然后在 Cloudflare Dashboard 一次性配置 `APP_PASSWORD` 和 `COOKIE_SECRET`。也可以使用 Wrangler 的批量 Secret 命令，避免逐个 Secret 触发中间版本。
+把返回的 `database_id` 写入 `wrangler.jsonc`，然后在 Cloudflare Dashboard 配置必需的 `APP_PASSWORD`。`COOKIE_SECRET` 是可选的高级覆盖项；省略时使用 D1 中自动生成的每部署随机密钥。
 
 执行检查并部署：
 
@@ -61,7 +80,7 @@ npm run deploy
 
 ## 本地开发
 
-复制本地配置并替换所有示例值：
+复制本地配置并替换 `APP_PASSWORD` 示例值：
 
 ```powershell
 Copy-Item .dev.vars.example .dev.vars
@@ -74,7 +93,7 @@ npx wrangler d1 migrations apply DB --local
 npm run dev
 ```
 
-`wrangler.jsonc` 把 `APP_PASSWORD` 与 `COOKIE_SECRET` 声明为 required secrets，供类型生成和本地缺失提示使用；Worker 运行时仍会独立执行 fail-closed 检查。如果需要在本地测试额外 vault，可通过 Wrangler 的本地变量覆盖传入 `APP_PASSWORDS`。
+`wrangler.jsonc` 只把 `APP_PASSWORD` 声明为 required secret。`COOKIE_SECRET` 可在 `.dev.vars` 中显式设置；省略、留空或保留两个已知示例值时，本地/线上 Worker 都会使用当前 D1 自动生成的随机密钥。自定义但少于 32 个字符的覆盖值会 fail closed。如果需要在本地测试额外 vault，可通过 Wrangler 的本地变量覆盖传入 `APP_PASSWORDS`。
 
 ## 从旧版本升级
 
@@ -89,11 +108,14 @@ npm run dev
 
 API 当前接受的标题/正文密文上限分别为 32,768/1,400,000 字符。客户端加密会增加体积；极大的历史明文可能无法直接保存，应先导出并拆分。超限请求会被拒绝，原记录不会被覆盖。
 
+一次性分享密文上限为 1,000,000 字符，以给 Workers Free 的 10 ms CPU 限制留出余量。超过该体积的笔记仍可正常保存在原 vault，但创建分享时会被拒绝，原笔记不会受影响。
+
 本次 schema 迁移会：
 
 - 删除不再使用、且无法搜索密文的 FTS5 表和触发器
 - 删除冗余索引
 - 添加适用于 vault + keyset pagination 的复合索引
+- 新增只保存客户端密文的一次性分享表和过期时间索引
 
 ## 主要能力
 
@@ -108,6 +130,8 @@ API 当前接受的标题/正文密文上限分别为 32,768/1,400,000 字符。
 - 稳定游标分页
 - 每页最多 10 条，控制接近 D1 单行上限的数据在 Workers 128 MB 内存限制内
 - 内存全文搜索
+- 每条笔记可创建 1 小时、24 小时或 7 天有效的一次性分享链接
+- 分享密钥仅存在于 URL fragment，首次有效领取从当前在线 D1 原子删除
 - CSP 和常用浏览器安全响应头
 - 安装到手机主屏幕所需的 Web App Manifest
 
@@ -135,6 +159,10 @@ public/
   index.html
   styles.css
   app.js
+  share.html
+  share.css
+  share.js
+  share-crypto.js
   _headers
   manifest.webmanifest
   app-icon.svg
@@ -144,7 +172,7 @@ src/
 migrations/
   0001_init.sql
   ...
-  0006_hardening.sql
+  0007_one_time_shares.sql
 test/
   apply-migrations.ts
   index.spec.ts
@@ -156,8 +184,9 @@ wrangler.jsonc
 - 主要面向单人或少量独立 vault，不是多人协作系统。
 - 不支持图片和附件；未来如增加附件，应在浏览器加密后存入 R2，D1 只保存元数据。
 - 当前没有自动密码轮换或恢复密钥流程。
+- 当前没有分享列表或提前撤销界面；未领取的分享会在最长 7 天后过期，并在后续创建分享时清理。
 - Static Assets 提供应用外壳，但没有离线笔记同步。
-- D1 Time Travel 在 Free/Paid 计划分别保留 7/30 天；长期备份仍应另行保存。
+- D1 Time Travel 在 Free/Paid 计划分别保留 7/30 天；它也意味着“阅后即焚”记录可能被管理员回滚恢复，长期备份仍应另行保存。
 
 ## Cloudflare 参考
 

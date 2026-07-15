@@ -26,6 +26,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run cf-typegen
+      - run: git diff --exit-code -- worker-configuration.d.ts
       - run: npm run check
       - run: npm audit --audit-level=high
       - run: npm run deploy:dry-run

@@ -11,8 +11,10 @@ import {
 	getSession,
 	getVaultIdForPassword,
 	recordFailedLogin,
+	resolveCookieSecret,
 	tooManyLoginAttempts,
 } from './auth';
+import { ensureApplicationSchema } from './schema';
 
 type AppEnv = Env & {
 	APP_PASSWORD?: string;
@@ -34,6 +36,17 @@ type NoteCursor = {
 	updatedAt: number;
 };
 
+type NoteShare = {
+	ciphertext: string;
+	expires_at: number;
+};
+
+type ShareToken = {
+	id: string;
+	proofHash: string;
+	signature: string;
+};
+
 const DEFAULT_LIST_LIMIT = 10;
 const MAX_LIST_LIMIT = 10;
 const MAX_LOGIN_BODY_BYTES = 4096;
@@ -41,8 +54,16 @@ const MAX_NOTE_BODY_BYTES = 1_500_000;
 const MAX_ENCRYPTED_TITLE_LENGTH = 32_768;
 const MAX_ENCRYPTED_CONTENT_LENGTH = 1_400_000;
 const MAX_KEY_CHECK_LENGTH = 16_384;
+const MAX_SHARE_BODY_BYTES = 1_100_000;
+const MAX_SHARE_CIPHERTEXT_LENGTH = 1_000_000;
+const MAX_SHARE_CONSUME_BODY_BYTES = 1024;
+const SHARE_TTL_SECONDS = new Set([60 * 60, 24 * 60 * 60, 7 * 24 * 60 * 60]);
 const NOTE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ENCRYPTED_VALUE_PATTERN = /^enc:v1:([A-Za-z0-9+/]+={0,2})$/;
+const SHARE_ENCRYPTED_VALUE_PATTERN = /^share:v1:([A-Za-z0-9+/]+={0,2})$/;
+const SHARE_PROOF_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const SHARE_TOKEN_PATTERN = /^([A-Za-z0-9_-]{43})\.([A-Za-z0-9_-]{43})\.([A-Za-z0-9_-]{43})$/;
+const PADDED_BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 class ApiError extends Error {
 	constructor(
@@ -73,6 +94,10 @@ function unauthorized() {
 
 function serviceUnavailable() {
 	return json({ ok: false, error: 'service_unavailable', code: 'auth_not_configured' }, 503);
+}
+
+function shareUnavailable() {
+	return json({ ok: false, error: 'share_unavailable', code: 'share_unavailable' }, 410);
 }
 
 function withCommonHeaders(response: Response, requestId: string) {
@@ -139,25 +164,51 @@ async function readJsonObject(request: Request, maxBytes: number) {
 	return parsed as Record<string, unknown>;
 }
 
-function requireEncryptedValue(value: unknown, field: string, maxLength: number) {
+function requireCiphertextEnvelope(
+	value: unknown,
+	field: string,
+	maxLength: number,
+	pattern: RegExp,
+	versionLabel: string
+) {
 	if (typeof value !== 'string' || value.length > maxLength || value.length < 24) {
-		throw new ApiError(400, 'invalid_ciphertext', `${field} must be valid enc:v1 ciphertext`);
+		throw new ApiError(400, 'invalid_ciphertext', `${field} must be valid ${versionLabel} ciphertext`);
 	}
 
-	const match = ENCRYPTED_VALUE_PATTERN.exec(value);
+	const match = pattern.exec(value);
 	try {
 		if (!match) throw new Error('invalid envelope');
 		const envelope = JSON.parse(atob(match[1])) as { data?: unknown; iv?: unknown };
 		if (!envelope || typeof envelope !== 'object' || typeof envelope.iv !== 'string' || typeof envelope.data !== 'string') {
 			throw new Error('invalid envelope fields');
 		}
-		const iv = Uint8Array.from(atob(envelope.iv), (character) => character.charCodeAt(0));
-		const data = Uint8Array.from(atob(envelope.data), (character) => character.charCodeAt(0));
-		if (iv.byteLength !== 12 || data.byteLength < 16) throw new Error('invalid AES-GCM payload');
+		if (getBase64DecodedLength(envelope.iv) !== 12 || getBase64DecodedLength(envelope.data) < 16) {
+			throw new Error('invalid AES-GCM payload');
+		}
 	} catch {
-		throw new ApiError(400, 'invalid_ciphertext', `${field} must be valid enc:v1 ciphertext`);
+		throw new ApiError(400, 'invalid_ciphertext', `${field} must be valid ${versionLabel} ciphertext`);
 	}
 	return value;
+}
+
+function getBase64DecodedLength(value: string) {
+	if (!value || value.length % 4 !== 0 || !PADDED_BASE64_PATTERN.test(value)) return -1;
+	const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+	return (value.length / 4) * 3 - padding;
+}
+
+function requireEncryptedValue(value: unknown, field: string, maxLength: number) {
+	return requireCiphertextEnvelope(value, field, maxLength, ENCRYPTED_VALUE_PATTERN, 'enc:v1');
+}
+
+function requireShareCiphertext(value: unknown) {
+	return requireCiphertextEnvelope(
+		value,
+		'ciphertext',
+		MAX_SHARE_CIPHERTEXT_LENGTH,
+		SHARE_ENCRYPTED_VALUE_PATTERN,
+		'share:v1'
+	);
 }
 
 function requireNoteId(value: unknown, field = 'id') {
@@ -175,6 +226,67 @@ function bytesToBase64(bytes: Uint8Array) {
 		binary += String.fromCharCode(...chunk);
 	}
 	return btoa(binary);
+}
+
+function bytesToBase64Url(bytes: Uint8Array) {
+	return bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function requireShareProof(value: unknown) {
+	if (typeof value !== 'string' || !SHARE_PROOF_PATTERN.test(value)) {
+		throw new ApiError(400, 'invalid_share_proof', 'proof must be a 256-bit base64url value');
+	}
+	return value;
+}
+
+function requireShareToken(value: unknown): ShareToken {
+	const match = typeof value === 'string' ? SHARE_TOKEN_PATTERN.exec(value) : null;
+	if (!match) throw new ApiError(400, 'invalid_share_token', 'invalid signed share token');
+	return { id: match[1], proofHash: match[2], signature: match[3] };
+}
+
+function requireShareTtl(value: unknown) {
+	if (!Number.isSafeInteger(value) || !SHARE_TTL_SECONDS.has(value as number)) {
+		throw new ApiError(400, 'invalid_share_expiry', 'expiresInSeconds must be 3600, 86400, or 604800');
+	}
+	return value as number;
+}
+
+async function hashShareSecret(namespace: 'proof' | 'token', value: string) {
+	const digest = await crypto.subtle.digest(
+		'SHA-256',
+		new TextEncoder().encode(`private-notes-share:${namespace}:v1\u0000${value}`)
+	);
+	return bytesToBase64Url(new Uint8Array(digest));
+}
+
+function createShareTokenId() {
+	return bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+function safeEqual(a: string, b: string) {
+	if (a.length !== b.length) return false;
+	let diff = 0;
+	for (let index = 0; index < a.length; index += 1) {
+		diff |= a.charCodeAt(index) ^ b.charCodeAt(index);
+	}
+	return diff === 0;
+}
+
+async function signShareToken(env: AppEnv, id: string, proofHash: string) {
+	const key = await crypto.subtle.importKey(
+		'raw',
+		new TextEncoder().encode(env.COOKIE_SECRET!),
+		{ name: 'HMAC', hash: 'SHA-256' },
+		false,
+		['sign']
+	);
+	const signature = await crypto.subtle.sign(
+		'HMAC',
+		key,
+		new TextEncoder().encode(`private-notes-share-token:v1\u0000${id}\u0000${proofHash}`)
+	);
+	return bytesToBase64Url(new Uint8Array(signature));
 }
 
 function base64UrlEncode(value: string) {
@@ -266,6 +378,62 @@ async function getNote(env: AppEnv, id: string, vaultId: string) {
 		.first<Note>();
 }
 
+async function createNoteShare(
+	env: AppEnv,
+	vaultId: string,
+	ciphertext: string,
+	proof: string,
+	expiresInSeconds: number
+) {
+	const now = Date.now();
+	const expiresAt = now + expiresInSeconds * 1000;
+	const proofHash = await hashShareSecret('proof', proof);
+
+	await env.DB.prepare('DELETE FROM note_shares WHERE expires_at <= ?').bind(now).run();
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		const tokenId = createShareTokenId();
+		const tokenHash = await hashShareSecret('token', tokenId);
+		const signature = await signShareToken(env, tokenId, proofHash);
+		const token = `${tokenId}.${proofHash}.${signature}`;
+		const created = await env.DB.prepare(
+			`INSERT INTO note_shares (token_hash, proof_hash, vault_id, ciphertext, created_at, expires_at)
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(token_hash) DO NOTHING
+			 RETURNING expires_at`
+		)
+			.bind(tokenHash, proofHash, vaultId, ciphertext, now, expiresAt)
+			.first<{ expires_at: number }>();
+		if (created) return { token, expiresAt: created.expires_at };
+	}
+
+	throw new Error('failed to allocate a unique share token');
+}
+
+async function consumeNoteShare(env: AppEnv, parsedToken: ShareToken, proof: string) {
+	const [expectedSignature, suppliedProofHash] = await Promise.all([
+		signShareToken(env, parsedToken.id, parsedToken.proofHash),
+		hashShareSecret('proof', proof),
+	]);
+	if (
+		!safeEqual(parsedToken.signature, expectedSignature) ||
+		!safeEqual(parsedToken.proofHash, suppliedProofHash)
+	) {
+		return null;
+	}
+	const tokenHash = await hashShareSecret('token', parsedToken.id);
+	const share = await env.DB.prepare(
+		`DELETE FROM note_shares
+		 WHERE token_hash = ? AND proof_hash = ?
+		 RETURNING ciphertext, expires_at`
+	)
+		.bind(tokenHash, parsedToken.proofHash)
+		.first<NoteShare>();
+
+	if (!share) return null;
+	if (share.expires_at <= Date.now()) return null;
+	return share;
+}
+
 function getVaultMetaKey(vaultId: string, name: 'salt' | 'key_check') {
 	const baseKey = name === 'salt' ? 'vault_salt' : 'vault_key_check';
 	return vaultId === 'default' ? baseKey : `${baseKey}:${vaultId}`;
@@ -308,6 +476,18 @@ async function initializeVaultKeyCheck(env: AppEnv, vaultId: string, candidate: 
 
 async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 	const url = new URL(request.url);
+	if (url.pathname.startsWith('/api/')) {
+		try {
+			await ensureApplicationSchema(env);
+			const cookieSecret = await resolveCookieSecret(env);
+			if (cookieSecret !== env.COOKIE_SECRET) {
+				env = Object.assign(Object.create(env), { COOKIE_SECRET: cookieSecret }) as AppEnv;
+			}
+		} catch {
+			console.error('Failed to initialize the application schema or managed signing secret');
+			return serviceUnavailable();
+		}
+	}
 
 	const authConfigurationError = getAuthConfigurationError(env);
 	if (url.pathname.startsWith('/api/') && authConfigurationError) {
@@ -360,9 +540,29 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 		);
 	}
 
+	const shareConsumeMatch = /^\/api\/shares\/([^/]+)\/consume$/.exec(url.pathname);
+	if (shareConsumeMatch && request.method === 'POST') {
+		const token = requireShareToken(shareConsumeMatch[1]);
+		const body = await readJsonObject(request, MAX_SHARE_CONSUME_BODY_BYTES);
+		const proof = requireShareProof(body.proof);
+		const share = await consumeNoteShare(env, token, proof);
+		return share
+			? json({ ok: true, ciphertext: share.ciphertext, expiresAt: share.expires_at })
+			: shareUnavailable();
+	}
+
 	const session = url.pathname.startsWith('/api/') ? await getSession(request, env) : null;
 	if (session && !session.authenticated) return unauthorized();
 	const vaultId = session?.vaultId || 'default';
+
+	if (url.pathname === '/api/shares' && request.method === 'POST') {
+		const body = await readJsonObject(request, MAX_SHARE_BODY_BYTES);
+		const ciphertext = requireShareCiphertext(body.ciphertext);
+		const proof = requireShareProof(body.proof);
+		const expiresInSeconds = requireShareTtl(body.expiresInSeconds);
+		const share = await createNoteShare(env, vaultId, ciphertext, proof, expiresInSeconds);
+		return json({ ok: true, token: share.token, expiresAt: share.expiresAt }, 201);
+	}
 
 	if (url.pathname === '/api/health' && request.method === 'GET') {
 		const result = await env.DB.prepare('SELECT COUNT(*) AS note_count FROM notes WHERE vault_id = ?')

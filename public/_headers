@@ -11,10 +11,27 @@
 /index.html
   Cache-Control: no-cache
 
+/share.html
+  ! Cache-Control
+  Cache-Control: no-store
+
+/share
+  ! Cache-Control
+  Cache-Control: no-store
+
 /app.js
   Cache-Control: public, max-age=0, must-revalidate
 
+/share.js
+  Cache-Control: public, max-age=0, must-revalidate
+
+/share-crypto.js
+  Cache-Control: public, max-age=0, must-revalidate
+
 /styles.css
+  Cache-Control: public, max-age=0, must-revalidate
+
+/share.css
   Cache-Control: public, max-age=0, must-revalidate
 
 /manifest.webmanifest

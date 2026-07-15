@@ -14,6 +14,9 @@ const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
 const DEFAULT_VAULT_ID = 'default';
 const MAX_SESSION_TOKEN_LENGTH = 4096;
+const MIN_COOKIE_SECRET_LENGTH = 32;
+const MANAGED_SIGNING_SECRET_META_KEY = 'managed_signing_secret:v1';
+const MANAGED_SIGNING_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const UNSAFE_NEW_APP_PASSWORDS = new Set(['replace-with-a-long-unique-passphrase']);
 const UNSAFE_COOKIE_SECRETS = new Set([
 	'change-this-to-a-long-random-string',
@@ -93,6 +96,59 @@ function normalizeVaultId(value: string) {
 	return normalized.replace(/^-|-$/g, '') || DEFAULT_VAULT_ID;
 }
 
+function isUsableCookieSecret(value: unknown) {
+	return (
+		typeof value === 'string' &&
+		value.length >= MIN_COOKIE_SECRET_LENGTH &&
+		!UNSAFE_COOKIE_SECRETS.has(value)
+	);
+}
+
+function isManagedSigningSecret(value: unknown) {
+	return typeof value === 'string' && MANAGED_SIGNING_SECRET_PATTERN.test(value);
+}
+
+/**
+ * Deploy to Cloudflare can ask users for Worker secrets, but it cannot generate
+ * a unique random value for each deployment. Keep an explicit COOKIE_SECRET as
+ * the preferred override; otherwise atomically initialize one per D1 database.
+ */
+export async function resolveCookieSecret(env: AuthEnv) {
+	const configuredSecret = env.COOKIE_SECRET;
+	if (typeof configuredSecret === 'string' && isUsableCookieSecret(configuredSecret)) return configuredSecret;
+	const useManagedSecret =
+		typeof configuredSecret !== 'string' ||
+		configuredSecret.length === 0 ||
+		UNSAFE_COOKIE_SECRETS.has(configuredSecret);
+	if (!useManagedSecret) {
+		throw new Error('COOKIE_SECRET override is shorter than 32 characters');
+	}
+
+	const existing = await env.DB.prepare('SELECT value FROM app_meta WHERE key = ? LIMIT 1')
+		.bind(MANAGED_SIGNING_SECRET_META_KEY)
+		.first<{ value: string }>();
+	if (existing) {
+		if (!isManagedSigningSecret(existing.value)) {
+			throw new Error('managed signing secret is invalid');
+		}
+		return existing.value;
+	}
+
+	const candidate = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
+	const created = await env.DB.prepare(
+		`INSERT INTO app_meta (key, value)
+		 VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = app_meta.value
+		 RETURNING value`
+	)
+		.bind(MANAGED_SIGNING_SECRET_META_KEY, candidate)
+		.first<{ value: string }>();
+	if (!created || !isManagedSigningSecret(created.value)) {
+		throw new Error('failed to initialize managed signing secret');
+	}
+	return created.value;
+}
+
 function getVaultCredentials(env: AuthEnv) {
 	const credentials: VaultCredential[] = [];
 	if (typeof env.APP_PASSWORD === 'string' && env.APP_PASSWORD.length > 0) {
@@ -117,7 +173,7 @@ function getVaultCredentials(env: AuthEnv) {
 
 /** Returns a safe diagnostic for the Worker entry point; null means authentication is usable. */
 export function getAuthConfigurationError(env: AuthEnv) {
-	if (typeof env.COOKIE_SECRET !== 'string' || env.COOKIE_SECRET.length < 32) {
+	if (typeof env.COOKIE_SECRET !== 'string' || env.COOKIE_SECRET.length < MIN_COOKIE_SECRET_LENGTH) {
 		return 'COOKIE_SECRET is missing or shorter than 32 characters';
 	}
 	if (UNSAFE_COOKIE_SECRETS.has(env.COOKIE_SECRET)) return 'COOKIE_SECRET still uses an example value';

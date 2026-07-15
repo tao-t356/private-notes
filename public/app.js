@@ -1,3 +1,5 @@
+import { encryptSharedPayload } from './share-crypto.js';
+
 /**
  * @typedef {{ id: string, title: string, content: string, created_at: number, updated_at: number, revision: number }} RawNote
  * @typedef {RawNote & { encrypted: boolean, decryptFailed: boolean }} Note
@@ -10,6 +12,10 @@ const KEY_CHECK_MARKER = 'private-notes-key-check:v1';
  * notes: Note[],
  * allNotes: Note[],
  * editingId: string | null,
+ * sharingNoteId: string | null,
+ * shareOperationId: number,
+ * shareCreating: boolean,
+ * shareReturnFocus: HTMLElement | null,
  * expandedIds: Set<string>,
  * statusTimer: number | null,
  * sessionAuthenticated: boolean,
@@ -26,6 +32,10 @@ const state = {
   notes: [],
   allNotes: [],
   editingId: null,
+  sharingNoteId: null,
+  shareOperationId: 0,
+  shareCreating: false,
+  shareReturnFocus: null,
   expandedIds: new Set(),
   statusTimer: null,
   sessionAuthenticated: false,
@@ -59,6 +69,13 @@ function getInput(id) {
 function getTextArea(id) {
   const element = getElement(id);
   if (!(element instanceof HTMLTextAreaElement)) throw new Error('页面元素类型错误：' + id);
+  return element;
+}
+
+/** @param {string} id @returns {HTMLSelectElement} */
+function getSelect(id) {
+  const element = getElement(id);
+  if (!(element instanceof HTMLSelectElement)) throw new Error('页面元素类型错误：' + id);
   return element;
 }
 
@@ -101,7 +118,18 @@ const els = {
   editorContent: getTextArea('editorContent'),
   closeModalBtn: getButton('closeModalBtn'),
   cancelBtn: getButton('cancelBtn'),
-  saveBtn: getButton('saveBtn')
+  saveBtn: getButton('saveBtn'),
+  shareModal: getElement('shareModal'),
+  shareNoteLabel: getElement('shareNoteLabel'),
+  shareExpiry: getSelect('shareExpiry'),
+  shareSetup: getElement('shareSetup'),
+  shareResult: getElement('shareResult'),
+  shareLinkInput: getInput('shareLinkInput'),
+  shareExpiryLabel: getElement('shareExpiryLabel'),
+  closeShareModalBtn: getButton('closeShareModalBtn'),
+  cancelShareBtn: getButton('cancelShareBtn'),
+  createShareBtn: getButton('createShareBtn'),
+  copyShareLinkBtn: getButton('copyShareLinkBtn')
 };
 
 /** @param {string} text */
@@ -130,9 +158,12 @@ function updateScrollUi() {
 }
 
 function updateModalUi() {
-  const open = !els.editorModal.classList.contains('hidden');
+  const open = !els.editorModal.classList.contains('hidden') || !els.shareModal.classList.contains('hidden');
   [els.topbar, els.fabNewBtn, els.fabTopBtn].forEach(function (element) {
     element.classList.toggle('modal-obscured', open);
+  });
+  [els.loginView, els.appView, els.fabNewBtn, els.fabTopBtn].forEach(function (element) {
+    element.inert = open;
   });
 }
 
@@ -304,6 +335,22 @@ async function encryptValue(value) {
     iv: bytesToBase64(iv),
     data: bytesToBase64(new Uint8Array(cipher))
   }));
+}
+
+/**
+ * Encrypts a decrypted note with a fresh random key that is never sent to the
+ * server. The proof lets the share endpoint authorize consumption without
+ * learning that key.
+ * @param {Note} note
+ */
+async function encryptShare(note) {
+  return encryptSharedPayload({
+    v: 1,
+    title: note.title || '无标题',
+    content: note.content || '',
+    createdAt: note.created_at,
+    sharedAt: Date.now()
+  });
 }
 
 /**
@@ -653,6 +700,15 @@ function renderList() {
         }
       };
 
+      const shareBtn = document.createElement('button');
+      shareBtn.type = 'button';
+      shareBtn.className = 'btn secondary';
+      shareBtn.textContent = '分享';
+      shareBtn.disabled = note.decryptFailed;
+      shareBtn.onclick = function () {
+        openShareDialog(note);
+      };
+
       const editBtn = document.createElement('button');
       editBtn.type = 'button';
       editBtn.className = 'btn secondary';
@@ -684,6 +740,7 @@ function renderList() {
       card.appendChild(meta);
       card.appendChild(actions);
       actions.appendChild(copyBtn);
+      actions.appendChild(shareBtn);
       actions.appendChild(editBtn);
       actions.appendChild(deleteBtn);
       card.appendChild(title);
@@ -813,6 +870,166 @@ async function deleteNote(id) {
 
   await refreshNotes();
   setStatus('已删除');
+}
+
+/** @param {Note} note */
+function openShareDialog(note) {
+  if (note.decryptFailed) {
+    setStatus('无法分享未成功解密的笔记');
+    return;
+  }
+  if (state.shareCreating) {
+    setStatus('上一条分享链接仍在创建，请稍候');
+    return;
+  }
+  const activeElement = document.activeElement;
+  state.shareReturnFocus = activeElement instanceof HTMLElement ? activeElement : null;
+  state.shareOperationId += 1;
+  state.sharingNoteId = note.id;
+  els.shareNoteLabel.textContent = '分享“' + (note.title || '无标题') + '”';
+  els.shareExpiry.value = '86400';
+  els.shareSetup.classList.remove('hidden');
+  els.shareResult.classList.add('hidden');
+  els.shareLinkInput.value = '';
+  els.shareExpiryLabel.textContent = '';
+  els.createShareBtn.classList.remove('hidden');
+  els.createShareBtn.disabled = false;
+  els.createShareBtn.textContent = '创建一次性链接';
+  els.cancelShareBtn.textContent = '取消';
+  els.shareModal.classList.remove('hidden');
+  els.shareModal.setAttribute('aria-hidden', 'false');
+  updateModalUi();
+  els.shareExpiry.focus();
+}
+
+/** @param {boolean} [force] */
+function closeShareDialog(force) {
+  if (state.shareCreating && !force) {
+    setStatus('链接正在创建，请稍候');
+    return;
+  }
+  const returnFocus = state.shareReturnFocus;
+  state.shareOperationId += 1;
+  setShareCreating(false);
+  els.shareModal.classList.add('hidden');
+  els.shareModal.setAttribute('aria-hidden', 'true');
+  els.shareLinkInput.value = '';
+  els.shareResult.classList.add('hidden');
+  state.sharingNoteId = null;
+  state.shareReturnFocus = null;
+  updateModalUi();
+  if (!force && returnFocus && returnFocus.isConnected) returnFocus.focus();
+}
+
+/** @param {boolean} creating */
+function setShareCreating(creating) {
+  state.shareCreating = creating;
+  els.shareExpiry.disabled = creating;
+  els.closeShareModalBtn.disabled = creating;
+  els.cancelShareBtn.disabled = creating;
+  els.createShareBtn.disabled = creating;
+  els.createShareBtn.textContent = creating ? '加密并创建中…' : '创建一次性链接';
+  if (creating) {
+    els.shareModal.setAttribute('aria-busy', 'true');
+    els.shareModal.focus();
+  } else {
+    els.shareModal.removeAttribute('aria-busy');
+  }
+}
+
+/** @param {number} operationId @param {string} noteId */
+function isCurrentShareOperation(operationId, noteId) {
+  return operationId === state.shareOperationId &&
+    noteId === state.sharingNoteId &&
+    !els.shareModal.classList.contains('hidden');
+}
+
+/**
+ * A forced close is not exposed in the UI, but if another application action
+ * invalidates a completed request, consume its newly-created record so it
+ * cannot remain as an unreachable orphan.
+ * @param {string} token
+ * @param {string} proof
+ */
+async function discardStaleShare(token, proof) {
+  try {
+    await fetch('/api/shares/' + encodeURIComponent(token) + '/consume', {
+      method: 'POST',
+      credentials: 'omit',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ proof: proof })
+    });
+  } catch {
+    // Best effort only: closing the page can still interrupt any browser request.
+  }
+}
+
+async function createShareLink() {
+  const note = state.allNotes.find(function (item) {
+    return item.id === state.sharingNoteId;
+  });
+  if (!note || note.decryptFailed) throw new Error('找不到可分享的已解密笔记');
+
+  const expiresInSeconds = Number(els.shareExpiry.value);
+  if (![3600, 86400, 604800].includes(expiresInSeconds)) {
+    throw new Error('请选择有效的链接期限');
+  }
+
+  const noteId = note.id;
+  const operationId = ++state.shareOperationId;
+  setShareCreating(true);
+  try {
+    const encrypted = await encryptShare(note);
+    const data = await api('/api/shares', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ciphertext: encrypted.ciphertext,
+        proof: encrypted.proof,
+        expiresInSeconds: expiresInSeconds
+      })
+    });
+    const token = String(data.token || '');
+    const expiresAt = Number(data.expiresAt);
+    if (!/^[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/.test(token) || !Number.isSafeInteger(expiresAt)) {
+      throw new Error('服务器返回的分享信息无效');
+    }
+
+    if (!isCurrentShareOperation(operationId, noteId)) {
+      await discardStaleShare(token, encrypted.proof);
+      return;
+    }
+
+    const shareUrl = new URL('/share', window.location.origin);
+    shareUrl.searchParams.set('t', token);
+    shareUrl.hash = encrypted.keyFragment;
+    els.shareLinkInput.value = shareUrl.toString();
+    els.shareExpiryLabel.textContent = '最晚有效至 ' + formatDate(expiresAt) + '；首次主动查看后立即失效。';
+    els.shareSetup.classList.add('hidden');
+    els.shareResult.classList.remove('hidden');
+    els.createShareBtn.classList.add('hidden');
+    els.cancelShareBtn.textContent = '完成';
+    els.copyShareLinkBtn.focus();
+    setStatus('一次性分享链接已创建');
+  } catch (error) {
+    if (!isCurrentShareOperation(operationId, noteId)) return;
+    throw error;
+  } finally {
+    if (isCurrentShareOperation(operationId, noteId)) setShareCreating(false);
+  }
+}
+
+async function copyShareLink() {
+  const link = els.shareLinkInput.value;
+  if (!link) throw new Error('请先创建分享链接');
+  try {
+    await navigator.clipboard.writeText(link);
+    setStatus('分享链接已复制');
+  } catch {
+    els.shareLinkInput.focus();
+    els.shareLinkInput.select();
+    setStatus('请手动复制已选中的链接');
+  }
 }
 
 /**
@@ -1007,6 +1224,8 @@ els.fabTopBtn.onclick = function () {
 
 async function logout() {
   await api('/api/logout', { method: 'POST' });
+  closeComposer();
+  closeShareDialog(true);
   state.notes = [];
   state.allNotes = [];
   state.sessionAuthenticated = false;
@@ -1043,10 +1262,53 @@ els.saveBtn.onclick = function () {
     setStatus(error.message || '保存失败');
   });
 };
+els.closeShareModalBtn.onclick = function () {
+  closeShareDialog();
+};
+els.cancelShareBtn.onclick = function () {
+  closeShareDialog();
+};
+els.createShareBtn.onclick = function () {
+  createShareLink().catch(function (error) {
+    setStatus(error instanceof Error ? error.message : '创建分享链接失败');
+  });
+};
+els.copyShareLinkBtn.onclick = function () {
+  copyShareLink().catch(function (error) {
+    setStatus(error instanceof Error ? error.message : '复制分享链接失败');
+  });
+};
 
 document.addEventListener('keydown', function (event) {
-  if (event.key === 'Escape' && !els.editorModal.classList.contains('hidden')) {
-    closeComposer();
+  if (event.key === 'Tab' && !els.shareModal.classList.contains('hidden')) {
+    const focusable = /** @type {HTMLElement[]} */ (Array.from(els.shareModal.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+    )).filter(function (element) {
+      return element instanceof HTMLElement && element.getClientRects().length > 0;
+    }));
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const activeElement = document.activeElement;
+    if (!first || !last) {
+      event.preventDefault();
+      els.shareModal.focus();
+    } else if (!(activeElement instanceof HTMLElement) ||
+      !els.shareModal.contains(activeElement) ||
+      !focusable.includes(activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey ? activeElement === first : activeElement === last) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
+  }
+  if (event.key === 'Escape') {
+    if (!els.shareModal.classList.contains('hidden')) {
+      event.preventDefault();
+      closeShareDialog();
+    } else if (!els.editorModal.classList.contains('hidden')) {
+      closeComposer();
+    }
   }
   const isSave = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's';
   if (isSave && !els.editorModal.classList.contains('hidden')) {
