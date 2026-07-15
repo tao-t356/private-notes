@@ -13,8 +13,7 @@
 	"preview_urls": false,
 	"secrets": {
 		"required": [
-			"APP_PASSWORD",
-			"COOKIE_SECRET"
+			"APP_PASSWORD"
 		]
 	},
 	"assets": {

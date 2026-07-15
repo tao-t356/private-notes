@@ -37,7 +37,7 @@
         "description": "Strong password for new default vaults. During a legacy upgrade, keep the existing value through the first post-upgrade login so its encryption key-check can be initialized; retain that old vault passphrase until all notes are re-encrypted."
       },
       "COOKIE_SECRET": {
-        "description": "Long random secret used to sign the HttpOnly session cookie."
+        "description": "Optional advanced override for session/share signing. If omitted, the Worker atomically creates a unique 256-bit signing secret in its D1 database."
       },
       "APP_PASSWORDS": {
         "description": "Optional additional isolated vaults. Format: vault_id=password,guest=another-password."

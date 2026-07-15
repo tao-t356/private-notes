@@ -11,8 +11,10 @@ import {
 	getSession,
 	getVaultIdForPassword,
 	recordFailedLogin,
+	resolveCookieSecret,
 	tooManyLoginAttempts,
 } from './auth';
+import { ensureApplicationSchema } from './schema';
 
 type AppEnv = Env & {
 	APP_PASSWORD?: string;
@@ -474,6 +476,18 @@ async function initializeVaultKeyCheck(env: AppEnv, vaultId: string, candidate: 
 
 async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 	const url = new URL(request.url);
+	if (url.pathname.startsWith('/api/')) {
+		try {
+			await ensureApplicationSchema(env);
+			const cookieSecret = await resolveCookieSecret(env);
+			if (cookieSecret !== env.COOKIE_SECRET) {
+				env = Object.assign(Object.create(env), { COOKIE_SECRET: cookieSecret }) as AppEnv;
+			}
+		} catch {
+			console.error('Failed to initialize the application schema or managed signing secret');
+			return serviceUnavailable();
+		}
+	}
 
 	const authConfigurationError = getAuthConfigurationError(env);
 	if (url.pathname.startsWith('/api/') && authConfigurationError) {
