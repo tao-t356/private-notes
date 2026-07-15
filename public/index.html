@@ -106,6 +106,40 @@
         </div>
       </div>
     </div>
+
+    <div id="shareModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="shareModalTitle" tabindex="-1">
+      <div class="card modal-card share-modal-card">
+        <div class="modal-head">
+          <div>
+            <h2 id="shareModalTitle" class="section-title">创建阅后即焚链接</h2>
+            <div id="shareNoteLabel" class="section-desc">内容会使用一次性随机密钥重新加密。</div>
+          </div>
+          <button id="closeShareModalBtn" class="btn secondary" type="button">关闭</button>
+        </div>
+
+        <div id="shareSetup">
+          <label class="field-label" for="shareExpiry">链接有效期</label>
+          <select id="shareExpiry" class="input share-select">
+            <option value="3600">1 小时</option>
+            <option value="86400" selected>24 小时</option>
+            <option value="604800">7 天</option>
+          </select>
+          <p class="share-warning">原笔记不会被删除。完整链接等同访问权，请只通过可信渠道发送。主动查看会先删除分享记录再传回密文，领取途中断网也可能无法重试；普通 GET 预览不会触发，但 D1 Time Travel、备份、主动安全扫描与截图不受此保证。</p>
+        </div>
+
+        <div id="shareResult" class="share-result hidden" role="status">
+          <label class="field-label" for="shareLinkInput">一次性分享链接</label>
+          <input id="shareLinkInput" class="input share-link-input" readonly autocomplete="off" spellcheck="false" />
+          <p id="shareExpiryLabel" class="field-help"></p>
+          <button id="copyShareLinkBtn" class="btn" type="button">复制链接</button>
+        </div>
+
+        <div class="modal-actions">
+          <button id="cancelShareBtn" class="btn secondary" type="button">取消</button>
+          <button id="createShareBtn" class="btn" type="button">创建一次性链接</button>
+        </div>
+      </div>
+    </div>
     <button id="fabNewBtn" class="btn fab-new hidden-when-modal" type="button" aria-label="新建笔记">＋</button>
     <button id="fabTopBtn" class="fab-top hidden-when-modal" type="button" aria-label="回到顶部">↑</button>
 
