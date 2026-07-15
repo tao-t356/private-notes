@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      cloudflare-tooling:
+        patterns:
+          - wrangler
+          - '@cloudflare/*'
+          - vitest
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

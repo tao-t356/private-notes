@@ -1,162 +1,168 @@
 # Private Notes
 
-一个部署在 Cloudflare Workers + D1 上的简洁私人笔记。
+一个部署在 Cloudflare Workers + D1 上的私人文本笔记应用。
 
-- 适合单人使用
-- 文本优先，支持搜索
-- 手机浏览器可直接使用
-- 已做基础 PWA 支持，可添加到主屏幕
-- 浏览器端端到端加密（E2EE）
-- 多密码登录，不同密码进入独立数据仓库
+- Workers 只处理 `/api/*`
+- HTML、CSS、JavaScript 由 Workers Static Assets 边缘分发
+- 浏览器使用 PBKDF2-SHA256 + AES-256-GCM 加密标题和正文
+- D1 保存密文、时间戳和登录限流状态；API 把单调的 `updated_at` 作为 revision token
+- 搜索、解密和筛选都在当前浏览器内完成
+- 支持多密码进入相互隔离的 vault
 
-## 一键部署到 Cloudflare
+## 安全模型
 
-当前仓库地址：
+当前实现属于“客户端加密、服务端保存密文”，不是零知识 E2EE：
 
-- `https://github.com/tao-t356/private-notes`
+- 新建 vault 时，同一个密码用于 Worker 访问验证和浏览器派生解密密钥。
+- Worker Secret 中仍保存访问密码，因此 Worker/部署管理员属于可信边界。
+- 原始 D1 数据泄露时，标题和正文默认是密文；新 API 拒绝写入明文。
+- 解密密钥只保存在当前页面内存，不写入 `localStorage`。
+- 修改 Worker 访问密码会让旧 Session 失效；已有密文仍需要原 vault 密码解锁，直至完成重加密。
 
-可以直接使用下面的一键部署按钮。Cloudflare 会根据 `wrangler.jsonc` 自动创建/绑定 D1，并根据 `.dev.vars.example` 提示填写 `APP_PASSWORD`、可选的 `APP_PASSWORDS` 和 `COOKIE_SECRET`；发布脚本会先执行 D1 migrations 再部署 Worker：
+> 从旧版本升级时，第一次升级后登录必须继续使用旧 `APP_PASSWORD`，让客户端用原加密密码初始化 key-check。初始化成功后可以修改 Worker 访问密码，但必须保留旧 vault 密码；首次使用新访问密码登录时，页面会进入“已认证、待解锁”状态，再输入旧 vault 密码即可解密。删除旧密码前，应先完成全部笔记重加密并保留数据库备份。
+
+从旧版本升级后，如果数据库里仍有历史明文，页面会显示“待加密”。逐条打开并保存即可转换为客户端密文。
+
+## 一键部署
+
+仓库地址：`https://github.com/tao-t356/private-notes`
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/tao-t356/private-notes)
 
-如果你 fork 了这个仓库，再把按钮里的地址改成你自己的 fork 地址。
+部署页面会根据 `wrangler.jsonc` 创建并绑定 D1，并要求填写：
+
+- `APP_PASSWORD`：长且唯一的 vault 密码
+- `COOKIE_SECRET`：至少 32 个随机字符，用于签名 Session
+
+如需额外 vault，可在部署后按需添加可选 Secret `APP_PASSWORDS`，格式为 `vault_id=password,guest=another-password`。
+
+新部署必须把所有示例值替换为真实的强密码。运行时会拒绝新的 `APP_PASSWORD` 占位值，以及缺失、过短或仍为示例值的 `COOKIE_SECRET`；为兼容已有密文，旧版本遗留的较短 `APP_PASSWORD` 不会被强制拒绝。
 
 ## 手动部署
 
-### 1. 安装依赖
+要求 Node.js 22 或更高版本。
 
 ```bash
 npm install
-```
-
-### 2. 登录 Cloudflare
-
-```bash
 npx wrangler login
-```
-
-### 3. 创建 D1 数据库
-
-```bash
 npx wrangler d1 create private-notes-db
 ```
 
-把返回的 `database_id` 填到 `wrangler.jsonc` 里的 `d1_databases` 配置中。
+把返回的 `database_id` 写入 `wrangler.jsonc`，然后在 Cloudflare Dashboard 一次性配置 `APP_PASSWORD` 和 `COOKIE_SECRET`。也可以使用 Wrangler 的批量 Secret 命令，避免逐个 Secret 触发中间版本。
 
-### 4. 执行数据库迁移
-
-```bash
-npx wrangler d1 migrations apply DB --remote
-```
-
-### 5. 设置 secrets
+执行检查并部署：
 
 ```bash
-npx wrangler secret put APP_PASSWORD
-# 可选：多个隔离数据仓库，格式 vault_id=password,guest=another-password
-npx wrangler secret put APP_PASSWORDS
-npx wrangler secret put COOKIE_SECRET
-```
-
-说明：
-
-- `APP_PASSWORD`：默认数据仓库密码；本地示例默认是 `facker668`，生产环境建议改成你自己的强密码。
-- `APP_PASSWORDS`：可选，多数据仓库密码映射，格式 `vault_id=password,guest=another-password`。输入不同密码会进入不同 vault，只能看到对应数据。
-- `COOKIE_SECRET`：任意长随机字符串，建议 32 字符以上
-
-### 6. 发布
-
-```bash
+npm run check
 npm run deploy
 ```
 
-部署完成后会得到一个 `workers.dev` 地址。
+`npm run deploy` 会先应用远程 D1 migrations，再部署 Worker。生产环境应先在 staging D1 验证向后兼容性，并在迁移前记录 D1 Time Travel 恢复点。
 
 ## 本地开发
 
-复制一份本地变量模板：
-
-```bash
-cp .dev.vars.example .dev.vars
-```
-
-Windows PowerShell 也可以用：
+复制本地配置并替换所有示例值：
 
 ```powershell
 Copy-Item .dev.vars.example .dev.vars
 ```
 
-然后把里面的值改成你自己的。
-
-启动本地开发：
+首次启动前应用本地 migrations：
 
 ```bash
-npx wrangler dev
+npx wrangler d1 migrations apply DB --local
+npm run dev
 ```
 
-## GitHub 自动部署
+`wrangler.jsonc` 把 `APP_PASSWORD` 与 `COOKIE_SECRET` 声明为 required secrets，供类型生成和本地缺失提示使用；Worker 运行时仍会独立执行 fail-closed 检查。如果需要在本地测试额外 vault，可通过 Wrangler 的本地变量覆盖传入 `APP_PASSWORDS`。
 
-除了 Deploy Button，也可以直接在 Cloudflare Dashboard 里：
+## 从旧版本升级
 
-1. 打开 **Workers & Pages**
-2. 连接 GitHub 仓库
-3. 选择这个项目
-4. 开启 Workers Builds
+1. 保留当前 `APP_PASSWORD` 和数据库备份，不要先轮换密码。
+2. 在 Cloudflare 查看 D1 Time Travel 当前恢复点，并运行 `npx wrangler d1 migrations list DB --remote` 核对旧迁移记录。若旧 Worker 曾运行时修改 schema、但远程 migration journal 不完整，应先在 staging 修复记录冲突，不能直接套用生产迁移。
+3. 执行 `npm ci` 和 `npm run check`。
+4. 执行 `npm run deploy`；如果使用现有 Workers Builds Git 集成，确认 Deploy command 是 `npm run deploy`，不能只运行 `wrangler deploy` 跳过 D1 migrations。
+5. 原有 Session 会失效。继续使用旧 `APP_PASSWORD` 完成第一次登录，让客户端原子初始化 vault salt/key-check。
+6. 确认旧密文可以解开后，才可修改 Worker 访问密码。之后首次用新密码登录会进入解锁界面，在那里输入旧 vault 密码。
+7. 检查页面是否提示“无法解密”或“待加密”，并对历史明文笔记逐条打开、保存。
+8. 如需彻底停用旧 vault 密码，先实现并完成全部笔记重加密；当前版本不提供自动轮换。
 
-以后 `git push` 就会自动部署。
+API 当前接受的标题/正文密文上限分别为 32,768/1,400,000 字符。客户端加密会增加体积；极大的历史明文可能无法直接保存，应先导出并拆分。超限请求会被拒绝，原记录不会被覆盖。
 
-## 手机端使用
+本次 schema 迁移会：
 
-### iPhone
+- 删除不再使用、且无法搜索密文的 FTS5 表和触发器
+- 删除冗余索引
+- 添加适用于 vault + keyset pagination 的复合索引
 
-1. 用 Safari 打开站点
-2. 登录
-3. 分享 → **添加到主屏幕**
+## 主要能力
 
-### Android
+- 默认 fail-closed 的密码登录
+- HttpOnly、Secure、SameSite=Strict、`__Host-` Session Cookie
+- 密码变更后自动撤销旧 Session
+- 按 IP 的原子登录失败计数
+- 多 vault 数据隔离
+- 客户端 AES-GCM 加密
+- set-once key-check，避免空 vault 使用错误密码初始化
+- 基于 `updated_at` 的 revision 乐观锁，避免多标签页静默覆盖或误删
+- 稳定游标分页
+- 每页最多 10 条，控制接近 D1 单行上限的数据在 Workers 128 MB 内存限制内
+- 内存全文搜索
+- CSP 和常用浏览器安全响应头
+- 安装到手机主屏幕所需的 Web App Manifest
 
-1. 用 Chrome 打开站点
-2. 登录
-3. 菜单 → **添加到主屏幕** / **安装应用**
+## 质量检查
 
-## 主要功能
+```bash
+npm run check
+npm audit
+npm run deploy:dry-run
+```
 
-- 登录保护
-- 多密码多数据仓库隔离
-- 浏览器端端到端加密
-- 笔记新建 / 编辑 / 删除
-- 本地标题和正文搜索
-- 按日期分组
-- 默认折叠长正文，支持展开
-- 一键复制全文
-- 手机端优化
+`npm run check` 包含：
+
+- Worker TypeScript 类型检查
+- 测试代码类型检查
+- 浏览器 JavaScript `checkJs`
+- Workers Runtime 中的 D1 migrations/API 集成测试
+
+GitHub Actions 会在 push 和 pull request 时运行同一套检查；Dependabot 每月检查 Cloudflare 工具链和 Actions 更新。
 
 ## 项目结构
 
 ```text
+public/
+  index.html
+  styles.css
+  app.js
+  _headers
+  manifest.webmanifest
+  app-icon.svg
 src/
-  homeHtml.ts   # 前端页面模板
-  index.ts      # Worker / API / PWA 路由
+  auth.ts
+  index.ts
 migrations/
   0001_init.sql
-  0002_notes_fts.sql
+  ...
+  0006_hardening.sql
+test/
+  apply-migrations.ts
+  index.spec.ts
 wrangler.jsonc
 ```
 
 ## 当前限制
 
-- 不支持图片 / 附件上传
-- 更适合单用户而不是多人协作
+- 主要面向单人或少量独立 vault，不是多人协作系统。
+- 不支持图片和附件；未来如增加附件，应在浏览器加密后存入 R2，D1 只保存元数据。
+- 当前没有自动密码轮换或恢复密钥流程。
+- Static Assets 提供应用外壳，但没有离线笔记同步。
+- D1 Time Travel 在 Free/Paid 计划分别保留 7/30 天；长期备份仍应另行保存。
 
-## 推荐后续增强
+## Cloudflare 参考
 
-- 导出备份
-- 搜索历史
-- 图片链接预览
-- 端到端加密版本
-
-
-
-
-
-
+- [Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/)
+- [Workers Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
+- [D1 Migrations](https://developers.cloudflare.com/d1/reference/migrations/)
+- [D1 Limits](https://developers.cloudflare.com/d1/platform/limits/)
+- [D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/)

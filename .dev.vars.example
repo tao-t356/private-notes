@@ -1,4 +1,4 @@
-APP_PASSWORD=facker668
+APP_PASSWORD=replace-with-a-long-unique-passphrase
 # Optional: add more isolated vaults. Format: vault_id=password,another_vault=another-password
 # APP_PASSWORDS=guest=change-this-second-password
-COOKIE_SECRET=change-this-to-a-long-random-string
+COOKIE_SECRET=replace-with-at-least-32-random-characters

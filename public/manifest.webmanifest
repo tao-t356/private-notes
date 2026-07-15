@@ -1,0 +1,19 @@
+{
+  "name": "Private Notes",
+  "short_name": "我的笔记",
+  "description": "一个部署在 Cloudflare Workers 上的简洁私人笔记。",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f5f5",
+  "theme_color": "#07c160",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

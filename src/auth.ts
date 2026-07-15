@@ -6,10 +6,24 @@ type AuthEnv = {
 };
 
 export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+export const SESSION_COOKIE_NAME = '__Host-session';
+export const MAX_PASSWORD_LENGTH = 1024;
+
 const LOGIN_MAX_FAILED_ATTEMPTS = 5;
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
 const DEFAULT_VAULT_ID = 'default';
+const MAX_SESSION_TOKEN_LENGTH = 4096;
+const UNSAFE_NEW_APP_PASSWORDS = new Set(['replace-with-a-long-unique-passphrase']);
+const UNSAFE_COOKIE_SECRETS = new Set([
+	'change-this-to-a-long-random-string',
+	'replace-with-at-least-32-random-characters',
+]);
+
+type VaultCredential = {
+	vaultId: string;
+	password: string;
+};
 
 type SessionData = {
 	authenticated: boolean;
@@ -18,11 +32,19 @@ type SessionData = {
 
 function getCookie(request: Request, name: string) {
 	const cookie = request.headers.get('cookie') || '';
-	const parts = cookie.split(';').map((item) => item.trim());
-	const prefix = name + '=';
-	for (const part of parts) {
-		if (part.startsWith(prefix)) return decodeURIComponent(part.slice(prefix.length));
+	const prefix = `${name}=`;
+
+	for (const item of cookie.split(';')) {
+		const part = item.trim();
+		if (!part.startsWith(prefix)) continue;
+
+		try {
+			return decodeURIComponent(part.slice(prefix.length));
+		} catch {
+			return '';
+		}
 	}
+
 	return '';
 }
 
@@ -37,6 +59,7 @@ function base64UrlEncode(input: string | Uint8Array) {
 }
 
 function base64UrlDecode(input: string) {
+	if (!/^[A-Za-z0-9_-]+$/.test(input)) throw new Error('invalid base64url');
 	const padded = input.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (input.length % 4)) % 4);
 	const binary = atob(padded);
 	const bytes = new Uint8Array(binary.length);
@@ -71,13 +94,12 @@ function normalizeVaultId(value: string) {
 }
 
 function getVaultCredentials(env: AuthEnv) {
-	const credentials: Array<{ vaultId: string; password: string }> = [];
-	if (env.APP_PASSWORD) {
+	const credentials: VaultCredential[] = [];
+	if (typeof env.APP_PASSWORD === 'string' && env.APP_PASSWORD.length > 0) {
 		credentials.push({ vaultId: DEFAULT_VAULT_ID, password: env.APP_PASSWORD });
 	}
 
-	const extra = env.APP_PASSWORDS || '';
-	for (const item of extra.split(',')) {
+	for (const item of (env.APP_PASSWORDS || '').split(',')) {
 		const trimmed = item.trim();
 		if (!trimmed) continue;
 
@@ -93,60 +115,121 @@ function getVaultCredentials(env: AuthEnv) {
 	return credentials;
 }
 
-export function isAuthConfigured(env: AuthEnv) {
-	return Boolean(env.COOKIE_SECRET && getVaultCredentials(env).length > 0);
+/** Returns a safe diagnostic for the Worker entry point; null means authentication is usable. */
+export function getAuthConfigurationError(env: AuthEnv) {
+	if (typeof env.COOKIE_SECRET !== 'string' || env.COOKIE_SECRET.length < 32) {
+		return 'COOKIE_SECRET is missing or shorter than 32 characters';
+	}
+	if (UNSAFE_COOKIE_SECRETS.has(env.COOKIE_SECRET)) return 'COOKIE_SECRET still uses an example value';
+
+	const credentials = getVaultCredentials(env);
+	if (credentials.length === 0) {
+		return 'APP_PASSWORD or APP_PASSWORDS is missing';
+	}
+
+	const vaultIds = new Set<string>();
+	const passwords = new Set<string>();
+	for (const credential of credentials) {
+		if (UNSAFE_NEW_APP_PASSWORDS.has(credential.password)) return 'APP_PASSWORD still uses an example value';
+		if (credential.password.length > MAX_PASSWORD_LENGTH) return 'vault password exceeds the supported length';
+		if (vaultIds.has(credential.vaultId)) return `duplicate vault id: ${credential.vaultId}`;
+		if (passwords.has(credential.password)) return 'duplicate vault password';
+		vaultIds.add(credential.vaultId);
+		passwords.add(credential.password);
+	}
+
+	return null;
 }
 
 export function getConfiguredVaultCount(env: AuthEnv) {
 	return getVaultCredentials(env).length;
 }
 
+async function getCredentialFingerprint(env: AuthEnv, credential: VaultCredential) {
+	if (!env.COOKIE_SECRET) return '';
+	return hmacSha256Base64Url(
+		env.COOKIE_SECRET,
+		`session-credential\u0000${credential.vaultId}\u0000${credential.password}`
+	);
+}
+
 export async function getVaultIdForPassword(env: AuthEnv, password: string) {
+	if (getAuthConfigurationError(env)) return null;
+
+	const suppliedFingerprint = await hmacSha256Base64Url(env.COOKIE_SECRET!, `login-password\u0000${password}`);
 	for (const credential of getVaultCredentials(env)) {
-		if (safeEqual(password, credential.password)) return credential.vaultId;
+		const configuredFingerprint = await hmacSha256Base64Url(
+			env.COOKIE_SECRET!,
+			`login-password\u0000${credential.password}`
+		);
+		if (safeEqual(suppliedFingerprint, configuredFingerprint)) return credential.vaultId;
 	}
 	return null;
 }
 
 export async function createSessionToken(env: AuthEnv, vaultId = DEFAULT_VAULT_ID) {
-	if (!env.COOKIE_SECRET) return '';
+	if (getAuthConfigurationError(env)) return '';
+	const normalizedVaultId = normalizeVaultId(vaultId);
+	const credential = getVaultCredentials(env).find((item) => item.vaultId === normalizedVaultId);
+	if (!credential) return '';
+
 	const now = Math.floor(Date.now() / 1000);
 	const payload = base64UrlEncode(
 		JSON.stringify({
-			v: 1,
-			vaultId: normalizeVaultId(vaultId),
+			v: 2,
+			vaultId: normalizedVaultId,
+			credential: await getCredentialFingerprint(env, credential),
 			iat: now,
 			exp: now + SESSION_MAX_AGE_SECONDS,
 		})
 	);
-	const signature = await hmacSha256Base64Url(env.COOKIE_SECRET, payload);
+	const signature = await hmacSha256Base64Url(env.COOKIE_SECRET!, payload);
 	return `${payload}.${signature}`;
 }
 
 async function verifySessionToken(env: AuthEnv, token: string) {
-	if (!env.COOKIE_SECRET) return null;
-	const [payload, signature] = token.split('.');
-	if (!payload || !signature || token.split('.').length !== 2) return null;
-	const expected = await hmacSha256Base64Url(env.COOKIE_SECRET, payload);
-	if (!safeEqual(signature, expected)) return null;
+	if (getAuthConfigurationError(env) || token.length > MAX_SESSION_TOKEN_LENGTH) return null;
+	const parts = token.split('.');
+	if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+	const [payload, signature] = parts;
+	const expectedSignature = await hmacSha256Base64Url(env.COOKIE_SECRET!, payload);
+	if (!safeEqual(signature, expectedSignature)) return null;
 
 	try {
-		const data = JSON.parse(base64UrlDecode(payload)) as { exp?: number; v?: number; vaultId?: string };
-		if (data.v !== 1 || typeof data.exp !== 'number' || data.exp <= Math.floor(Date.now() / 1000)) {
+		const data = JSON.parse(base64UrlDecode(payload)) as {
+			credential?: unknown;
+			exp?: unknown;
+			v?: unknown;
+			vaultId?: unknown;
+		};
+		const now = Math.floor(Date.now() / 1000);
+		if (
+			data.v !== 2 ||
+			typeof data.exp !== 'number' ||
+			!Number.isSafeInteger(data.exp) ||
+			data.exp <= now ||
+			typeof data.vaultId !== 'string' ||
+			normalizeVaultId(data.vaultId) !== data.vaultId ||
+			typeof data.credential !== 'string'
+		) {
 			return null;
 		}
-		return normalizeVaultId(data.vaultId || DEFAULT_VAULT_ID);
+
+		const credential = getVaultCredentials(env).find((item) => item.vaultId === data.vaultId);
+		if (!credential) return null;
+		const currentFingerprint = await getCredentialFingerprint(env, credential);
+		return safeEqual(data.credential, currentFingerprint) ? credential.vaultId : null;
 	} catch {
 		return null;
 	}
 }
 
 export async function getSession(request: Request, env: AuthEnv): Promise<SessionData> {
-	if (!isAuthConfigured(env)) {
-		return { authenticated: true, vaultId: DEFAULT_VAULT_ID };
+	if (getAuthConfigurationError(env)) {
+		return { authenticated: false, vaultId: DEFAULT_VAULT_ID };
 	}
 
-	const session = getCookie(request, 'session');
+	const session = getCookie(request, SESSION_COOKIE_NAME);
 	if (!session) return { authenticated: false, vaultId: DEFAULT_VAULT_ID };
 	const vaultId = await verifySessionToken(env, session);
 	return vaultId
@@ -154,39 +237,25 @@ export async function getSession(request: Request, env: AuthEnv): Promise<Sessio
 		: { authenticated: false, vaultId: DEFAULT_VAULT_ID };
 }
 
-export async function isAuthed(request: Request, env: AuthEnv) {
-	return (await getSession(request, env)).authenticated;
-}
-
-export async function getAuthedVaultId(request: Request, env: AuthEnv) {
-	return (await getSession(request, env)).vaultId;
-}
-
 function getClientIp(request: Request) {
-	return (
-		request.headers.get('cf-connecting-ip') ||
-		request.headers.get('x-real-ip') ||
-		request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-		'unknown'
-	);
+	return (request.headers.get('cf-connecting-ip') || 'unknown').slice(0, 128);
 }
 
 async function getLoginRateLimitKey(request: Request, env: AuthEnv) {
-	const userAgent = (request.headers.get('user-agent') || 'unknown').slice(0, 160);
-	return hmacSha256Base64Url(env.COOKIE_SECRET || 'missing-secret', `login:${getClientIp(request)}:${userAgent}`);
+	return hmacSha256Base64Url(env.COOKIE_SECRET!, `login-ip\u0000${getClientIp(request)}`);
 }
 
 export async function getLoginRateLimit(request: Request, env: AuthEnv) {
 	const key = await getLoginRateLimitKey(request, env);
 	const now = Date.now();
 	const row = await env.DB.prepare(
-		`SELECT attempts, first_attempt_at, locked_until
+		`SELECT locked_until
 		 FROM auth_rate_limits
 		 WHERE key = ?
 		 LIMIT 1`
 	)
 		.bind(key)
-		.first<{ attempts: number; first_attempt_at: number; locked_until: number }>();
+		.first<{ locked_until: number }>();
 
 	if (row?.locked_until && row.locked_until > now) {
 		return {
@@ -196,45 +265,48 @@ export async function getLoginRateLimit(request: Request, env: AuthEnv) {
 		};
 	}
 
-	return {
-		key,
-		limited: false,
-		retryAfterSeconds: 0,
-	};
+	return { key, limited: false, retryAfterSeconds: 0 };
 }
 
 export async function recordFailedLogin(env: AuthEnv, key: string) {
 	const now = Date.now();
 	const row = await env.DB.prepare(
-		`SELECT attempts, first_attempt_at
-		 FROM auth_rate_limits
-		 WHERE key = ?
-		 LIMIT 1`
-	)
-		.bind(key)
-		.first<{ attempts: number; first_attempt_at: number }>();
-
-	const isFreshWindow = !row || now - row.first_attempt_at > LOGIN_RATE_LIMIT_WINDOW_MS;
-	const attempts = isFreshWindow ? 1 : row.attempts + 1;
-	const firstAttemptAt = isFreshWindow ? now : row.first_attempt_at;
-	const lockedUntil = attempts >= LOGIN_MAX_FAILED_ATTEMPTS ? now + LOGIN_LOCKOUT_MS : 0;
-
-	await env.DB.prepare(
 		`INSERT INTO auth_rate_limits (key, attempts, first_attempt_at, locked_until, updated_at)
-		 VALUES (?, ?, ?, ?, ?)
+		 VALUES (?, 1, ?, 0, ?)
 		 ON CONFLICT(key) DO UPDATE SET
-			attempts = excluded.attempts,
-			first_attempt_at = excluded.first_attempt_at,
-			locked_until = excluded.locked_until,
-			updated_at = excluded.updated_at`
+			attempts = CASE
+				WHEN excluded.updated_at - auth_rate_limits.first_attempt_at > ? THEN 1
+				ELSE auth_rate_limits.attempts + 1
+			END,
+			first_attempt_at = CASE
+				WHEN excluded.updated_at - auth_rate_limits.first_attempt_at > ? THEN excluded.updated_at
+				ELSE auth_rate_limits.first_attempt_at
+			END,
+			locked_until = CASE
+				WHEN excluded.updated_at - auth_rate_limits.first_attempt_at > ? THEN 0
+				WHEN auth_rate_limits.attempts + 1 >= ? THEN excluded.updated_at + ?
+				ELSE auth_rate_limits.locked_until
+			END,
+			updated_at = excluded.updated_at
+		 RETURNING attempts, locked_until`
 	)
-		.bind(key, attempts, firstAttemptAt, lockedUntil, now)
-		.run();
+		.bind(
+			key,
+			now,
+			now,
+			LOGIN_RATE_LIMIT_WINDOW_MS,
+			LOGIN_RATE_LIMIT_WINDOW_MS,
+			LOGIN_RATE_LIMIT_WINDOW_MS,
+			LOGIN_MAX_FAILED_ATTEMPTS,
+			LOGIN_LOCKOUT_MS
+		)
+		.first<{ attempts: number; locked_until: number }>();
 
+	if (!row) throw new Error('failed to update login rate limit');
 	return {
-		attempts,
-		locked: lockedUntil > now,
-		retryAfterSeconds: lockedUntil > now ? Math.ceil((lockedUntil - now) / 1000) : 0,
+		attempts: row.attempts,
+		locked: row.locked_until > now,
+		retryAfterSeconds: row.locked_until > now ? Math.ceil((row.locked_until - now) / 1000) : 0,
 	};
 }
 
@@ -248,23 +320,21 @@ export async function cleanupOldLoginRateLimits(env: AuthEnv) {
 }
 
 export function tooManyLoginAttempts(retryAfterSeconds: number) {
-	const minutes = Math.max(1, Math.ceil(retryAfterSeconds / 60));
+	const seconds = Math.max(1, Math.ceil(retryAfterSeconds));
+	const minutes = Math.max(1, Math.ceil(seconds / 60));
 	return new Response(
-		JSON.stringify(
-			{
-				ok: false,
-				error: `登录失败次数过多，请 ${minutes} 分钟后再试`,
-				retryAfterSeconds,
-			},
-			null,
-			2
-		),
+		JSON.stringify({
+			ok: false,
+			error: `登录失败次数过多，请 ${minutes} 分钟后再试`,
+			retryAfterSeconds: seconds,
+		}),
 		{
 			status: 429,
 			headers: {
 				'content-type': 'application/json; charset=utf-8',
 				'cache-control': 'no-store',
-				'retry-after': String(retryAfterSeconds),
+				'retry-after': String(seconds),
+				'x-content-type-options': 'nosniff',
 			},
 		}
 	);

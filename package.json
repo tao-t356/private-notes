@@ -1,22 +1,32 @@
 {
   "name": "private-notes",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
-    "build": "tsc --noEmit",
+    "build": "npm run typecheck",
+    "check": "npm run typecheck && npm run typecheck:test && npm run typecheck:client && npm run test:ci",
+    "predeploy": "npm run check",
     "deploy": "npm run db:migrations:apply && wrangler deploy",
+    "deploy:dry-run": "wrangler deploy --dry-run",
     "dev": "wrangler dev",
     "start": "wrangler dev",
     "test": "vitest",
+    "test:ci": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:client": "tsc --noEmit -p tsconfig.client.json",
+    "typecheck:test": "tsc --noEmit -p test/tsconfig.json",
     "cf-typegen": "wrangler types",
     "db:migrations:apply": "wrangler d1 migrations apply DB --remote"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.12.4",
-    "@types/node": "^25.6.0",
-    "typescript": "^5.5.2",
-    "vitest": "~3.2.0",
-    "wrangler": "^4.82.2"
+    "@cloudflare/vitest-pool-workers": "0.18.5",
+    "@types/node": "^22.0.0",
+    "typescript": "~5.9.3",
+    "vitest": "4.1.10",
+    "wrangler": "4.111.0"
   },
   "cloudflare": {
     "bindings": {
@@ -24,13 +34,13 @@
         "description": "D1 database used to store encrypted private notes and auth rate-limit records."
       },
       "APP_PASSWORD": {
-        "description": "Default vault login password. Change it in production; the browser also uses it to unlock encrypted notes."
+        "description": "Strong password for new default vaults. During a legacy upgrade, keep the existing value through the first post-upgrade login so its encryption key-check can be initialized; retain that old vault passphrase until all notes are re-encrypted."
       },
       "COOKIE_SECRET": {
         "description": "Long random secret used to sign the HttpOnly session cookie."
       },
       "APP_PASSWORDS": {
-        "description": "Optional extra isolated vault passwords. Format: vault_id=password,guest=another-password."
+        "description": "Optional additional isolated vaults. Format: vault_id=password,guest=another-password."
       }
     }
   }

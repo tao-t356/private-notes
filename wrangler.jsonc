@@ -6,11 +6,24 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "private-notes",
 	"main": "src/index.ts",
-	"compatibility_date": "2026-04-14",
+	"compatibility_date": "2026-07-15",
 	"compatibility_flags": [
-		"nodejs_compat",
 		"global_fetch_strictly_public"
 	],
+	"preview_urls": false,
+	"secrets": {
+		"required": [
+			"APP_PASSWORD",
+			"COOKIE_SECRET"
+		]
+	},
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS",
+		"run_worker_first": [
+			"/api/*"
+		]
+	},
 	"d1_databases": [
 		{
 			"binding": "DB",
