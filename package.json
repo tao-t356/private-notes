@@ -9,7 +9,7 @@
     "build": "npm run typecheck",
     "check": "npm run typecheck && npm run typecheck:test && npm run typecheck:client && npm run test:tools && npm run test:ci",
     "predeploy": "npm run check",
-    "deploy": "npm run db:migrations:apply && wrangler deploy",
+    "deploy": "wrangler deploy && npm run db:migrations:apply",
     "deploy:dry-run": "wrangler deploy --dry-run",
     "dev": "wrangler dev",
     "start": "wrangler dev",
@@ -21,7 +21,7 @@
     "typecheck:client": "tsc --noEmit -p tsconfig.client.json",
     "typecheck:test": "tsc --noEmit -p test/tsconfig.json",
     "cf-typegen": "wrangler types",
-    "db:migrations:apply": "node tools/validate-deployment-config.mjs && wrangler d1 migrations apply DB --remote"
+    "db:migrations:apply": "wrangler d1 migrations apply DB --remote"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.18.5",

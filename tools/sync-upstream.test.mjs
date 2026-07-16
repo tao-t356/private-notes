@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -12,7 +12,6 @@ import {
 	synchronizeUpstreamSnapshot,
 } from './sync-upstream.mjs';
 import { installUpstreamWorkflow } from './enable-upstream-sync.mjs';
-import { getDeploymentConfigurationError } from './validate-deployment-config.mjs';
 
 test('merges upstream behavior while preserving deployment identity and custom vars', () => {
 	const upstream = {
@@ -92,23 +91,21 @@ test('parses commented Wrangler JSONC and rejects invalid input', () => {
 	assert.throws(() => parseJsonc('{ invalid', 'test'), /test is invalid/);
 });
 
-test('requires a real D1 database ID before production migrations or deploy', () => {
-	assert.match(
-		getDeploymentConfigurationError({ d1_databases: [{ binding: 'DB', database_name: 'private-notes-db' }] }),
-		/database_id/
-	);
-	assert.equal(
-		getDeploymentConfigurationError({
-			d1_databases: [
-				{
-					binding: 'DB',
-					database_name: 'private-notes-db',
-					database_id: '123e4567-e89b-42d3-a456-426614174000',
-				},
-			],
-		}),
-		null
-	);
+test('keeps the runtime schema gate aligned with every D1 migration file', () => {
+	const migrationNames = readdirSync(new URL('../migrations/', import.meta.url))
+		.filter((name) => /^\d+_.+\.sql$/.test(name))
+		.sort();
+	const schemaSource = readFileSync(new URL('../src/schema.ts', import.meta.url), 'utf8');
+	const manifest = schemaSource.match(/const APPLIED_MIGRATIONS = \[([\s\S]*?)\] as const;/);
+	assert.ok(manifest, 'src/schema.ts must declare APPLIED_MIGRATIONS');
+	const runtimeNames = [...manifest[1].matchAll(/'([^']+\.sql)'/g)].map((match) => match[1]);
+	assert.deepEqual(runtimeNames, migrationNames);
+});
+
+test('deploys code before applying migrations so automatic D1 provisioning can run', () => {
+	const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+	assert.equal(packageJson.scripts.deploy, 'wrangler deploy && npm run db:migrations:apply');
+	assert.equal(packageJson.scripts['db:migrations:apply'], 'wrangler d1 migrations apply DB --remote');
 });
 
 test('installs the workflow template idempotently', () => {

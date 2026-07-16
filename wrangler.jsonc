@@ -11,12 +11,8 @@
 		"global_fetch_strictly_public"
 	],
 	"preview_urls": false,
+	"workers_dev": true,
 	"keep_vars": true,
-	"secrets": {
-		"required": [
-			"APP_PASSWORD"
-		]
-	},
 	"assets": {
 		"directory": "./public",
 		"binding": "ASSETS",
@@ -32,7 +28,9 @@
 	"d1_databases": [
 		{
 			"binding": "DB",
-			"database_name": "private-notes-db"
+			"database_name": "private-notes-db",
+			"migrations_dir": "migrations",
+			"migrations_table": "d1_migrations"
 		}
 	],
 	"observability": {
