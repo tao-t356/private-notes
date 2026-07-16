@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>一次性笔记 · Private Notes</title>
+    <meta name="description" content="查看一条客户端加密、阅后即焚的 Private Notes 分享。" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex, nofollow, noarchive" />
+    <meta name="theme-color" content="#07c160" />
+    <link rel="icon" href="/app-icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/share.css" />
+  </head>
+  <body class="share-page">
+    <main class="share-shell">
+      <section class="card share-card" aria-labelledby="sharePageTitle">
+        <div class="share-brand">
+          <div class="login-brand-icon">✎</div>
+          <div>
+            <div class="login-mini">Private Notes</div>
+            <h1 id="sharePageTitle" class="share-title">一次性加密笔记</h1>
+          </div>
+        </div>
+
+        <div id="shareIntro">
+          <p class="share-lead">这条内容已在发送者的浏览器中使用随机密钥加密。</p>
+          <div class="share-burn-warning" role="note">
+            点击后，密文会先从当前在线 D1 原子删除，再传回本页解密。领取途中断网或解密失败也可能无法重试；Cloudflare Time Travel、备份或管理员回滚仍可能恢复记录。
+          </div>
+          <button id="consumeShareBtn" class="btn share-consume" type="button">查看并销毁</button>
+        </div>
+
+        <div id="shareStatus" class="share-status" role="status" aria-live="polite">正在检查分享链接…</div>
+
+        <article id="sharedNote" class="shared-note hidden">
+          <div id="sharedMeta" class="shared-meta"></div>
+          <h2 id="sharedTitle" class="shared-title"></h2>
+          <div id="sharedContent" class="shared-content"></div>
+          <button id="clearSharedNoteBtn" class="btn danger share-clear" type="button">立即清除当前页面内容</button>
+        </article>
+      </section>
+    </main>
+
+    <script type="module" src="/share.js"></script>
+  </body>
+</html>

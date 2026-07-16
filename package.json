@@ -1,0 +1,44 @@
+{
+  "name": "private-notes",
+  "version": "1.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "npm run typecheck",
+    "check": "npm run typecheck && npm run typecheck:test && npm run typecheck:client && npm run test:tools && npm run test:ci",
+    "predeploy": "npm run check",
+    "deploy": "wrangler deploy && npm run db:migrations:apply",
+    "deploy:dry-run": "wrangler deploy --dry-run",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "test": "vitest",
+    "test:ci": "vitest run",
+    "test:tools": "node --test tools/*.test.mjs",
+    "enable:updates": "node tools/enable-upstream-sync.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:client": "tsc --noEmit -p tsconfig.client.json",
+    "typecheck:test": "tsc --noEmit -p test/tsconfig.json",
+    "cf-typegen": "wrangler types",
+    "db:migrations:apply": "wrangler d1 migrations apply DB --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.18.5",
+    "@types/node": "^22.0.0",
+    "jsonc-parser": "3.3.1",
+    "typescript": "~5.9.3",
+    "vitest": "4.1.10",
+    "wrangler": "4.111.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "DB": {
+        "description": "D1 database used to store encrypted notes, one-time shares, and authentication metadata. Cloudflare creates and binds it automatically."
+      },
+      "APP_PASSWORD": {
+        "description": "Set a long, unique password for signing in to Private Notes. Save it in a password manager; it cannot be recovered from the application."
+      }
+    }
+  }
+}

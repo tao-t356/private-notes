@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Private Notes</title>
+    <meta name="theme-color" content="#07c160" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="我的笔记" />
+    <meta name="description" content="一个部署在 Cloudflare Workers 上的简洁私人笔记。" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/app-icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <section id="loginView" class="login-wrap">
+        <div class="card login-card">
+          <div class="login-brand">
+            <div class="login-brand-icon">✎</div>
+            <div>
+              <div class="login-mini">Private Notes</div>
+              <h1 id="loginTitle" class="login-title">正在打开我的笔记</h1>
+            </div>
+          </div>
+          <div id="unlockBadge" class="unlock-badge hidden">✓ 已通过访问验证，只需输入密码解锁内容</div>
+          <p id="loginDesc" class="login-desc">正在检查当前设备的访问状态，页面会保持在原位。</p>
+
+          <div class="field-stack">
+            <label class="field-label" for="passwordInput">密码</label>
+            <input id="passwordInput" class="input" type="password" autocomplete="current-password" placeholder="请稍候…" disabled />
+            <div id="passwordHelp" class="field-help">刷新时不再切换页面，只会显示这层锁屏。</div>
+          </div>
+
+          <div class="login-actions">
+            <button id="loginBtn" class="btn login-submit">进入笔记</button>
+            <button id="loginLogoutBtn" class="btn secondary login-logout hidden" type="button">退出当前会话</button>
+          </div>
+          <div class="security-note">客户端加密开启后，D1 只保存密文；搜索会在本地浏览器里完成。忘记密码将无法恢复旧密文。</div>
+          <div id="loginStatus" class="login-foot"></div>
+        </div>
+      </section>
+
+      <section id="appView" class="app-dimmed">
+        <header id="topbar" class="card topbar hidden-when-modal">
+          <div>
+            <h1 id="topbarTitle" class="topbar-title">我的笔记</h1>
+            <div class="topbar-subtitle">客户端加密 · 内存解锁 · 本地搜索</div>
+          </div>
+          <div class="topbar-actions">
+            <div class="search-wrap">
+              <input id="searchInput" class="input search" placeholder="搜索标题或正文…" />
+              <button id="clearSearchBtn" class="clear-search" type="button" aria-label="清空搜索">×</button>
+            </div>
+            <button id="searchBtn" class="btn secondary">搜索</button>
+            <button id="newBtn" class="btn topbar-new-btn">新建笔记</button>
+            <button id="logoutBtn" class="btn secondary">退出登录</button>
+          </div>
+        </header>
+
+        <div id="statusLine" class="status-line"></div>
+
+        <section id="vaultPanel" class="vault-panel hidden">
+          <h2 class="vault-panel-title">内容已加密</h2>
+          <p id="vaultPanelDesc" class="vault-panel-desc">请输入密码查看笔记内容。忘记密码将无法在页面内恢复旧密文。</p>
+          <div class="field-stack">
+            <label class="field-label" for="vaultUnlockInput">密码</label>
+            <input id="vaultUnlockInput" class="input" type="password" autocomplete="current-password" placeholder="输入密码" />
+          </div>
+          <div class="vault-panel-actions">
+            <button id="unlockBtn" class="btn">解锁内容</button>
+          </div>
+        </section>
+
+        <main class="layout">
+          <section class="card feed">
+            <div class="section-head">
+              <div>
+                <h2 class="section-title">全部笔记</h2>
+                <div class="section-desc">按更新时间排序，支持直接复制内容。</div>
+              </div>
+              <div id="noteCount" class="muted">0 条</div>
+            </div>
+            <div id="noteList" class="note-list"></div>
+          </section>
+        </main>
+      </section>
+    </div>
+
+    <div id="editorModal" class="modal-backdrop hidden">
+      <div class="card modal-card">
+        <div class="modal-head">
+          <div>
+            <h2 id="modalTitle" class="section-title">新建笔记</h2>
+            <div class="section-desc">保留简单编辑窗，平时主要还是用来浏览和复制。</div>
+          </div>
+          <button id="closeModalBtn" class="btn secondary">关闭</button>
+        </div>
+        <input id="editorTitle" class="input" placeholder="标题" />
+        <div class="editor-spacer"></div>
+        <textarea id="editorContent" class="textarea" placeholder="# 今天想到什么&#10;&#10;- 一条记录&#10;- 一个链接&#10;- 一个待办"></textarea>
+        <div class="modal-actions">
+          <button id="cancelBtn" class="btn secondary">取消</button>
+          <button id="saveBtn" class="btn">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="shareModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="shareModalTitle" tabindex="-1">
+      <div class="card modal-card share-modal-card">
+        <div class="modal-head">
+          <div>
+            <h2 id="shareModalTitle" class="section-title">创建阅后即焚链接</h2>
+            <div id="shareNoteLabel" class="section-desc">内容会使用一次性随机密钥重新加密。</div>
+          </div>
+          <button id="closeShareModalBtn" class="btn secondary" type="button">关闭</button>
+        </div>
+
+        <div id="shareSetup">
+          <label class="field-label" for="shareExpiry">链接有效期</label>
+          <select id="shareExpiry" class="input share-select">
+            <option value="3600">1 小时</option>
+            <option value="86400" selected>24 小时</option>
+            <option value="604800">7 天</option>
+          </select>
+          <p class="share-warning">原笔记不会被删除。完整链接等同访问权，请只通过可信渠道发送。主动查看会先删除分享记录再传回密文，领取途中断网也可能无法重试；普通 GET 预览不会触发，但 D1 Time Travel、备份、主动安全扫描与截图不受此保证。</p>
+        </div>
+
+        <div id="shareResult" class="share-result hidden" role="status">
+          <label class="field-label" for="shareLinkInput">一次性分享链接</label>
+          <input id="shareLinkInput" class="input share-link-input" readonly autocomplete="off" spellcheck="false" />
+          <p id="shareExpiryLabel" class="field-help"></p>
+          <button id="copyShareLinkBtn" class="btn" type="button">复制链接</button>
+        </div>
+
+        <div class="modal-actions">
+          <button id="cancelShareBtn" class="btn secondary" type="button">取消</button>
+          <button id="createShareBtn" class="btn" type="button">创建一次性链接</button>
+        </div>
+      </div>
+    </div>
+    <button id="fabNewBtn" class="btn fab-new hidden-when-modal" type="button" aria-label="新建笔记">＋</button>
+    <button id="fabTopBtn" class="fab-top hidden-when-modal" type="button" aria-label="回到顶部">↑</button>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
