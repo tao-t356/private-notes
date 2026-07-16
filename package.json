@@ -21,7 +21,7 @@
     "typecheck:client": "tsc --noEmit -p tsconfig.client.json",
     "typecheck:test": "tsc --noEmit -p test/tsconfig.json",
     "cf-typegen": "wrangler types",
-    "db:migrations:apply": "wrangler d1 migrations apply DB --remote"
+    "db:migrations:apply": "node tools/validate-deployment-config.mjs && wrangler d1 migrations apply DB --remote"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.18.5",
@@ -30,30 +30,5 @@
     "typescript": "~5.9.3",
     "vitest": "4.1.10",
     "wrangler": "4.111.0"
-  },
-  "cloudflare": {
-    "bindings": {
-      "DB": {
-        "description": "D1 database used to store encrypted private notes and auth rate-limit records."
-      },
-      "APP_PASSWORD": {
-        "description": "Strong password for new default vaults. During a legacy upgrade, keep the existing value through the first post-upgrade login so its encryption key-check can be initialized; retain that old vault passphrase until all notes are re-encrypted."
-      },
-      "COOKIE_SECRET": {
-        "description": "Optional advanced override for session/share signing. If omitted, the Worker atomically creates a unique 256-bit signing secret in its D1 database."
-      },
-      "APP_PASSWORDS": {
-        "description": "Optional additional isolated vaults. Format: vault_id=password,guest=another-password."
-      },
-      "APP_NAME": {
-        "description": "Public application brand name shown in the browser and share page. Default: `Private Notes`."
-      },
-      "APP_SHORT_NAME": {
-        "description": "Public short title shown in the app and when installed as a PWA. Default: `我的笔记`."
-      },
-      "APP_DESCRIPTION": {
-        "description": "Public application description used in page metadata and the PWA manifest."
-      }
-    }
   }
 }

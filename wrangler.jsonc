@@ -11,11 +11,7 @@
 		"global_fetch_strictly_public"
 	],
 	"preview_urls": false,
-	"vars": {
-		"APP_NAME": "Private Notes",
-		"APP_SHORT_NAME": "我的笔记",
-		"APP_DESCRIPTION": "一个部署在 Cloudflare Workers 上的简洁私人笔记。"
-	},
+	"keep_vars": true,
 	"secrets": {
 		"required": [
 			"APP_PASSWORD"
@@ -36,8 +32,7 @@
 	"d1_databases": [
 		{
 			"binding": "DB",
-			"database_name": "private-notes-db",
-			"database_id": "f0f38848-3593-47e5-8b24-18c4ffefff9c"
+			"database_name": "private-notes-db"
 		}
 	],
 	"observability": {

@@ -117,9 +117,10 @@ async function initializeFreshDatabase(db: D1Database) {
 }
 
 /**
- * Deploy to Cloudflare may use its default `wrangler deploy` command and skip
- * repository migrations. Bootstrap only a completely empty auto-provisioned
- * D1 database; partial/existing schemas fail closed and must use migrations.
+ * Legacy Deploy to Cloudflare installs may use the default `wrangler deploy`
+ * command and skip repository migrations. Bootstrap only a completely empty
+ * auto-provisioned D1 database; partial/existing schemas fail closed and must
+ * use migrations.
  */
 export function ensureApplicationSchema(env: SchemaEnv) {
 	const cacheKey = env.DB as unknown as object;
