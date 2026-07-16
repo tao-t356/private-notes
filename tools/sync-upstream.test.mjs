@@ -13,6 +13,15 @@ import {
 } from './sync-upstream.mjs';
 import { installUpstreamWorkflow } from './enable-upstream-sync.mjs';
 
+function isCanonicalUpstreamCheckout() {
+	try {
+		const origin = execFileSync('git', ['remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim();
+		return /github\.com[/:]tao-t356\/private-notes(?:\.git)?$/.test(origin);
+	} catch {
+		return false;
+	}
+}
+
 test('merges upstream behavior while preserving deployment identity and custom vars', () => {
 	const upstream = {
 		name: 'private-notes',
@@ -115,7 +124,11 @@ test('keeps Deploy to Cloudflare self-configuring without sharing an account dat
 	const wrangler = parseJsonc(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'), 'wrangler.jsonc');
 	const database = wrangler.d1_databases.find((candidate) => candidate.binding === 'DB');
 	assert.equal(database.database_name, 'private-notes-db');
-	assert.equal(database.database_id, undefined);
+	if (isCanonicalUpstreamCheckout()) {
+		assert.equal(database.database_id, undefined);
+	} else if (database.database_id !== undefined) {
+		assert.match(database.database_id, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
+	}
 	assert.deepEqual(wrangler.secrets?.required, ['APP_PASSWORD']);
 	const exampleSecrets = readFileSync(new URL('../.dev.vars.example', import.meta.url), 'utf8')
 		.split(/\r?\n/)
@@ -141,9 +154,14 @@ test('installs the workflow template idempotently', () => {
 	}
 });
 
-test('keeps the Fork workflow identical to the legacy-clone template', () => {
+test('keeps the checked-in workflow identical when the repository provider preserves workflows', () => {
+	const workflow = new URL('../.github/workflows/sync-upstream.yml', import.meta.url);
+	if (!existsSync(workflow)) {
+		assert.equal(isCanonicalUpstreamCheckout(), false, 'the canonical repository must keep its update workflow');
+		return;
+	}
 	assert.equal(
-		readFileSync(new URL('../.github/workflows/sync-upstream.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n'),
+		readFileSync(workflow, 'utf8').replace(/\r\n/g, '\n'),
 		readFileSync(new URL('./upstream-sync.workflow.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 	);
 });
