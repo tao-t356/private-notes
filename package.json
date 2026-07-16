@@ -30,5 +30,15 @@
     "typescript": "~5.9.3",
     "vitest": "4.1.10",
     "wrangler": "4.111.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "DB": {
+        "description": "D1 database used to store encrypted notes, one-time shares, and authentication metadata. Cloudflare creates and binds it automatically."
+      },
+      "APP_PASSWORD": {
+        "description": "Set a long, unique password for signing in to Private Notes. Save it in a password manager; it cannot be recovered from the application."
+      }
+    }
   }
 }

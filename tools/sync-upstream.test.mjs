@@ -108,6 +108,26 @@ test('deploys code before applying migrations so automatic D1 provisioning can r
 	assert.equal(packageJson.scripts['db:migrations:apply'], 'wrangler d1 migrations apply DB --remote');
 });
 
+test('keeps Deploy to Cloudflare self-configuring without sharing an account database', () => {
+	const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+	assert.ok(packageJson.cloudflare?.bindings?.APP_PASSWORD?.description);
+	assert.ok(packageJson.cloudflare?.bindings?.DB?.description);
+	const wrangler = parseJsonc(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'), 'wrangler.jsonc');
+	const database = wrangler.d1_databases.find((candidate) => candidate.binding === 'DB');
+	assert.equal(database.database_name, 'private-notes-db');
+	assert.equal(database.database_id, undefined);
+	assert.deepEqual(wrangler.secrets?.required, ['APP_PASSWORD']);
+	const exampleSecrets = readFileSync(new URL('../.dev.vars.example', import.meta.url), 'utf8')
+		.split(/\r?\n/)
+		.filter((line) => line && !line.startsWith('#'))
+		.map((line) => line.split('=', 1)[0]);
+	assert.deepEqual(exampleSecrets, ['APP_PASSWORD']);
+	assert.match(
+		readFileSync(new URL('../README.md', import.meta.url), 'utf8'),
+		/https:\/\/deploy\.workers\.cloudflare\.com\/\?url=https:\/\/github\.com\/tao-t356\/private-notes/
+	);
+});
+
 test('installs the workflow template idempotently', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'private-notes-updater-'));
 	try {
