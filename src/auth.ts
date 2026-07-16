@@ -109,9 +109,10 @@ function isManagedSigningSecret(value: unknown) {
 }
 
 /**
- * Deploy to Cloudflare can ask users for Worker secrets, but it cannot generate
- * a unique random value for each deployment. Keep an explicit COOKIE_SECRET as
- * the preferred override; otherwise atomically initialize one per D1 database.
+ * Legacy Deploy to Cloudflare installs could ask users for Worker secrets, but
+ * could not generate a unique random value for each deployment. Keep an
+ * explicit COOKIE_SECRET as the preferred override; otherwise atomically
+ * initialize one per D1 database.
  */
 export async function resolveCookieSecret(env: AuthEnv) {
 	const configuredSecret = env.COOKIE_SECRET;

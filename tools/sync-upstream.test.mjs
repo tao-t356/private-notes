@@ -12,6 +12,7 @@ import {
 	synchronizeUpstreamSnapshot,
 } from './sync-upstream.mjs';
 import { installUpstreamWorkflow } from './enable-upstream-sync.mjs';
+import { getDeploymentConfigurationError } from './validate-deployment-config.mjs';
 
 test('merges upstream behavior while preserving deployment identity and custom vars', () => {
 	const upstream = {
@@ -91,6 +92,25 @@ test('parses commented Wrangler JSONC and rejects invalid input', () => {
 	assert.throws(() => parseJsonc('{ invalid', 'test'), /test is invalid/);
 });
 
+test('requires a real D1 database ID before production migrations or deploy', () => {
+	assert.match(
+		getDeploymentConfigurationError({ d1_databases: [{ binding: 'DB', database_name: 'private-notes-db' }] }),
+		/database_id/
+	);
+	assert.equal(
+		getDeploymentConfigurationError({
+			d1_databases: [
+				{
+					binding: 'DB',
+					database_name: 'private-notes-db',
+					database_id: '123e4567-e89b-42d3-a456-426614174000',
+				},
+			],
+		}),
+		null
+	);
+});
+
 test('installs the workflow template idempotently', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'private-notes-updater-'));
 	try {
@@ -102,6 +122,13 @@ test('installs the workflow template idempotently', () => {
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}
+});
+
+test('keeps the Fork workflow identical to the legacy-clone template', () => {
+	assert.equal(
+		readFileSync(new URL('../.github/workflows/sync-upstream.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n'),
+		readFileSync(new URL('./upstream-sync.workflow.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+	);
 });
 
 test('replaces an unrelated deployment snapshot while preserving local Cloudflare identity', () => {

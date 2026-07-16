@@ -15,6 +15,7 @@ const SUPPORTED_TOP_LEVEL_KEYS = new Set([
 	'compatibility_date',
 	'compatibility_flags',
 	'preview_urls',
+	'keep_vars',
 	'account_id',
 	'zone_id',
 	'route',
