@@ -63,6 +63,40 @@
 
 一键部署时可保留默认值；部署后可在 Cloudflare Dashboard 的 **Settings → Variables and Secrets** 中把它们作为普通 Variable 修改并重新部署。也可在自己克隆的仓库中修改 `wrangler.jsonc` 的 `vars`。
 
+### 一键部署后如何升级
+
+Cloudflare Deploy Button 会在使用者账号中创建一个独立仓库，而不是 GitHub Fork，因此 GitHub 不会显示 **Sync fork**。实际导入还可能移除 `.github/workflows/*`，所以项目不会要求使用者授予作者仓库权限，而是提供可自行启用的更新工具。
+
+首次启用：
+
+1. 打开自己的部署仓库，点击 **Code → Codespaces → Create codespace on main**。
+2. 在 Cloudflare Worker 的 **Settings → Build** 中：
+   - 确认 **Deploy command** 为 `npm run deploy`，不能是默认的 `npx wrangler deploy`。这样合并含新 migration 的升级时，会先升级当前 D1 再部署 Worker。
+   - 在 **Branch control** 关闭 **Builds for non-production branches**，避免升级分支在 PR 审阅前触发 Cloudflare 预览构建。
+3. 在 Codespaces 终端运行：
+
+```bash
+npm run enable:updates -- --push
+```
+
+4. 回到仓库的 **Actions**，选择 **Sync upstream Private Notes**，点击 **Run workflow**，勾选已确认 Deploy command 和已关闭非生产分支构建的两个选项。
+5. 工作流会创建独立升级分支和 Pull Request；检查通过后由仓库所有者合并，Cloudflare Workers Builds 再自动部署。
+
+更新器不会普通 merge 两段无关历史，而是导入新的上游快照并在推送前强制校验。它会保留部署仓库现有的：
+
+- Worker `name` 和 npm package name
+- D1 `database_id` / `database_name`，以及已支持的 KV、R2、Vectorize、Hyperdrive 资源标识
+- 自定义 routes、`workers_dev` 和已有 `vars`
+- 已启用的本地 GitHub workflows
+
+更新器不会导入上游的 `.github/workflows/*`，只保留部署仓库已有的 workflow，避免要求用户提供额外 PAT/Workflows 写权限。
+
+Cloudflare Secrets 的值本来就不存在 Git 中，升级不会读取或改写它们。准备 job 只运行当前已信任的更新器，禁用 Git hooks，生成一个尚未执行的固定提交；因已关闭 Cloudflare 非生产分支构建，这次推送不会触发预览部署。随后只读验证 job 才会运行类型检查、工具测试、Workers/D1 集成测试、依赖审计和 deploy dry-run。最后的 job 会再次核对分支仍指向刚验证的精确 commit，相同才创建 PR。身份校验或代码验证失败时都不会创建 PR。
+
+如果新版本增加或删除了 D1/KV/R2 等 Cloudflare 资源绑定，或使用了更新器尚未支持的 `env.*`、Durable Objects、Services、Queues 等 Wrangler 配置，更新器也会 fail closed，要求手动复核和配置对应资源，不会静默删除或沿用上游项目的资源 ID。
+
+> 早于此更新机制创建的旧部署仓库还没有 `enable:updates` 命令，需要先安全同步一次启用工具；不要为了升级重新点击 Deploy Button，否则可能创建新 Worker 和新 D1。
+
 Deploy to Cloudflare 如果使用默认的 `npx wrangler deploy` 而没有执行 migrations，Worker 会在第一次 API 请求时仅对“完全空白”的自动创建 D1 原子建立当前 schema，并同步写入 `d1_migrations` journal。只要发现任意旧表或部分 schema，它就会 fail closed，要求先运行正式 migrations，绝不会猜测升级已有笔记库。
 
 ## 手动部署
@@ -156,9 +190,10 @@ npm run deploy:dry-run
 - Worker TypeScript 类型检查
 - 测试代码类型检查
 - 浏览器 JavaScript `checkJs`
+- 上游更新器的资源身份保留和无关 Git 历史集成测试
 - Workers Runtime 中的 D1 migrations/API 集成测试
 
-GitHub Actions 会在 push 和 pull request 时运行同一套检查；Dependabot 每月检查 Cloudflare 工具链和 Actions 更新。
+上游仓库的 GitHub Actions 会在 push 和 pull request 时运行同一套检查；Dependabot 每月检查 Cloudflare 工具链和 Actions 更新。Cloudflare 一键导入的独立仓库需先按上文启用更新 workflow。
 
 ## 项目结构
 
@@ -184,6 +219,10 @@ migrations/
 test/
   apply-migrations.ts
   index.spec.ts
+tools/
+  enable-upstream-sync.mjs
+  sync-upstream.mjs
+  upstream-sync.workflow.yml
 wrangler.jsonc
 ```
 
@@ -199,6 +238,10 @@ wrangler.jsonc
 ## Cloudflare 参考
 
 - [Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/)
+- [Deploy to Cloudflare buttons](https://developers.cloudflare.com/workers/platform/deploy-buttons/)
+- [Workers Builds Git integration](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/)
+- [Workers Builds configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)
+- [Workers Builds branch control](https://developers.cloudflare.com/workers/ci-cd/builds/build-branches/)
 - [Workers Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
 - [D1 Migrations](https://developers.cloudflare.com/d1/reference/migrations/)
 - [D1 Limits](https://developers.cloudflare.com/d1/platform/limits/)

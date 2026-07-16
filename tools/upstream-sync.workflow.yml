@@ -1,0 +1,141 @@
+name: Sync upstream Private Notes
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_command_confirmed:
+        description: I confirmed Cloudflare Settings > Build > Deploy command is npm run deploy
+        required: true
+        type: boolean
+      non_production_builds_disabled:
+        description: I disabled Cloudflare builds for non-production branches before syncing
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  prepare-update:
+    if: github.repository != 'tao-t356/private-notes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      branch: ${{ steps.prepare.outputs.branch }}
+      commit_sha: ${{ steps.prepare.outputs.commit_sha }}
+      has_update: ${{ steps.prepare.outputs.has_update }}
+    steps:
+      - name: Require safe Cloudflare build settings
+        if: inputs.deploy_command_confirmed != true || inputs.non_production_builds_disabled != true
+        run: |
+          echo "Set Cloudflare Settings > Build > Deploy command to: npm run deploy"
+          echo "Disable Cloudflare Settings > Build > Branch control > Builds for non-production branches."
+          exit 1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Disable repository Git hooks for the updater job
+        run: |
+          mkdir -p "$RUNNER_TEMP/empty-git-hooks"
+          git config core.hooksPath "$RUNNER_TEMP/empty-git-hooks"
+      - name: Install the currently trusted updater dependencies
+        run: npm ci
+      - name: Prepare an inert update commit without executing updated code
+        id: prepare
+        shell: bash
+        run: |
+          branch="upstream-sync/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git switch -c "$branch"
+          node tools/sync-upstream.mjs
+          git add --all
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          if git diff --cached --quiet; then
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --no-verify -m "chore: sync upstream private-notes"
+          commit_sha="$(git rev-parse HEAD)"
+          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
+          echo "has_update=true" >> "$GITHUB_OUTPUT"
+      - name: Push the inert commit without executing updated code
+        if: steps.prepare.outputs.has_update == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_BRANCH: ${{ steps.prepare.outputs.branch }}
+        shell: bash
+        run: |
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "refs/heads/${SYNC_BRANCH}:refs/heads/${SYNC_BRANCH}"
+
+  verify-update:
+    needs: prepare-update
+    if: needs.prepare-update.outputs.has_update == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact inert commit with no persisted credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.prepare-update.outputs.commit_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install and verify updated code with a read-only repository token
+        env:
+          APP_PASSWORD: update-check-password-with-strong-entropy
+          COOKIE_SECRET: update-check-cookie-secret-with-at-least-32-characters
+        run: |
+          npm ci
+          npm run check
+          npx wrangler types --check
+          npm audit --audit-level=high
+          npm run deploy:dry-run
+
+  publish-update:
+    needs: [prepare-update, verify-update]
+    if: needs.prepare-update.outputs.has_update == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Open a PR only if the verified branch still points to the exact commit
+        env:
+          EXPECTED_SHA: ${{ needs.prepare-update.outputs.commit_sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_BRANCH: ${{ needs.prepare-update.outputs.branch }}
+        shell: bash
+        run: |
+          actual_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${SYNC_BRANCH}" --jq '.object.sha')"
+          if [ "$actual_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::The update branch changed after verification. Refusing to open a pull request."
+            exit 1
+          fi
+          if ! gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$SYNC_BRANCH" \
+            --title "chore: sync upstream Private Notes" \
+            --body "Verified automated upstream update. Worker name, Cloudflare resource IDs, routes, package name, and existing vars were preserved. The read-only verification job completed tests, audit, type generation checks, and deploy dry-run. Review the diff before merging."; then
+            echo "::warning::The verified branch was pushed, but repository settings prevented automatic PR creation."
+            echo "Open https://github.com/${GITHUB_REPOSITORY}/compare/main...${SYNC_BRANCH}?expand=1 to create it manually."
+          fi

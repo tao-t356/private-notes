@@ -7,7 +7,7 @@
   },
   "scripts": {
     "build": "npm run typecheck",
-    "check": "npm run typecheck && npm run typecheck:test && npm run typecheck:client && npm run test:ci",
+    "check": "npm run typecheck && npm run typecheck:test && npm run typecheck:client && npm run test:tools && npm run test:ci",
     "predeploy": "npm run check",
     "deploy": "npm run db:migrations:apply && wrangler deploy",
     "deploy:dry-run": "wrangler deploy --dry-run",
@@ -15,6 +15,8 @@
     "start": "wrangler dev",
     "test": "vitest",
     "test:ci": "vitest run",
+    "test:tools": "node --test tools/*.test.mjs",
+    "enable:updates": "node tools/enable-upstream-sync.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "typecheck:client": "tsc --noEmit -p tsconfig.client.json",
     "typecheck:test": "tsc --noEmit -p test/tsconfig.json",
@@ -24,6 +26,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.18.5",
     "@types/node": "^22.0.0",
+    "jsonc-parser": "3.3.1",
     "typescript": "~5.9.3",
     "vitest": "4.1.10",
     "wrangler": "4.111.0"
