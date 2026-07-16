@@ -55,6 +55,14 @@
 
 新部署必须把 `APP_PASSWORD` 示例值替换为自己的密码。为兼容已有密文，旧版本遗留的较短 `APP_PASSWORD` 不会被强制拒绝，但应尽快在完成重加密流程后升级为强口令。
 
+项目品牌文字也可以自定义，且都是公开的普通 Variable，不是 Secret：
+
+- `APP_NAME`：完整品牌名，默认 `Private Notes`。
+- `APP_SHORT_NAME`：页面主标题和 PWA 短名，默认`我的笔记`。
+- `APP_DESCRIPTION`：浏览器元信息和 PWA 简介。
+
+一键部署时可保留默认值；部署后可在 Cloudflare Dashboard 的 **Settings → Variables and Secrets** 中把它们作为普通 Variable 修改并重新部署。也可在自己克隆的仓库中修改 `wrangler.jsonc` 的 `vars`。
+
 Deploy to Cloudflare 如果使用默认的 `npx wrangler deploy` 而没有执行 migrations，Worker 会在第一次 API 请求时仅对“完全空白”的自动创建 D1 原子建立当前 schema，并同步写入 `d1_migrations` journal。只要发现任意旧表或部分 schema，它就会 fail closed，要求先运行正式 migrations，绝不会猜测升级已有笔记库。
 
 ## 手动部署

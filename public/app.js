@@ -26,7 +26,8 @@ const KEY_CHECK_MARKER = 'private-notes-key-check:v1';
  * noteCountMeta: number,
  * decryptFailedCount: number,
  * legacyPlaintextCount: number,
- * unlockError: string
+ * unlockError: string,
+ * appShortName: string
  * }} */
 const state = {
   notes: [],
@@ -46,7 +47,8 @@ const state = {
   noteCountMeta: 0,
   decryptFailedCount: 0,
   legacyPlaintextCount: 0,
-  unlockError: ''
+  unlockError: '',
+  appShortName: document.documentElement.dataset.appShortName || '我的笔记'
 };
 /**
  * @param {string} id
@@ -175,14 +177,14 @@ function updateLoginMode() {
   els.passwordInput.disabled = checking;
   els.loginBtn.disabled = checking;
   if (checking) {
-    els.loginTitle.textContent = '正在打开我的笔记';
+    els.loginTitle.textContent = '正在打开' + state.appShortName;
     els.loginDesc.textContent = '正在检查当前设备的访问状态，页面会保持在原位。';
     els.passwordInput.placeholder = '请稍候…';
     els.passwordHelp.textContent = '刷新时不再切换页面，只会显示这层锁屏。';
     els.loginBtn.textContent = '请稍候…';
     return;
   }
-  els.loginTitle.textContent = unlockOnly ? '解锁我的笔记' : '登录到我的笔记';
+  els.loginTitle.textContent = unlockOnly ? '解锁' + state.appShortName : '登录到' + state.appShortName;
   els.loginDesc.textContent = unlockOnly
     ? '你已经通过访问验证。现在输入密码解锁本地加密内容；刷新后不会再出现页面跳转。'
     : '输入密码后即可进入应用，并在本地解锁你的加密笔记。';
@@ -190,7 +192,7 @@ function updateLoginMode() {
   els.passwordHelp.textContent = unlockOnly
     ? '密码只在本次页面会话中用于派生解密密钥，不再明文保存到 localStorage。'
     : '同一个密码同时用于访问站点和本地解密。';
-  els.loginBtn.textContent = unlockOnly ? '解锁我的笔记' : '进入笔记';
+  els.loginBtn.textContent = unlockOnly ? '解锁' + state.appShortName : '进入笔记';
 }
 
 function updateVaultUi() {

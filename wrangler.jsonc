@@ -11,6 +11,11 @@
 		"global_fetch_strictly_public"
 	],
 	"preview_urls": false,
+	"vars": {
+		"APP_NAME": "Private Notes",
+		"APP_SHORT_NAME": "我的笔记",
+		"APP_DESCRIPTION": "一个部署在 Cloudflare Workers 上的简洁私人笔记。"
+	},
 	"secrets": {
 		"required": [
 			"APP_PASSWORD"
@@ -20,7 +25,12 @@
 		"directory": "./public",
 		"binding": "ASSETS",
 		"run_worker_first": [
-			"/api/*"
+			"/api/*",
+			"/",
+			"/index.html",
+			"/share",
+			"/share.html",
+			"/manifest.webmanifest"
 		]
 	},
 	"d1_databases": [

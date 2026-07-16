@@ -15,11 +15,15 @@ import {
 	tooManyLoginAttempts,
 } from './auth';
 import { ensureApplicationSchema } from './schema';
+import { createBrandedManifest, getAppBranding, rewriteBrandedHtml } from './branding';
 
-type AppEnv = Env & {
+type AppEnv = Omit<Env, 'APP_NAME' | 'APP_SHORT_NAME' | 'APP_DESCRIPTION'> & {
 	APP_PASSWORD?: string;
 	APP_PASSWORDS?: string;
 	COOKIE_SECRET?: string;
+	APP_NAME?: string;
+	APP_SHORT_NAME?: string;
+	APP_DESCRIPTION?: string;
 };
 
 type Note = {
@@ -64,6 +68,12 @@ const SHARE_ENCRYPTED_VALUE_PATTERN = /^share:v1:([A-Za-z0-9+/]+={0,2})$/;
 const SHARE_PROOF_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const SHARE_TOKEN_PATTERN = /^([A-Za-z0-9_-]{43})\.([A-Za-z0-9_-]{43})\.([A-Za-z0-9_-]{43})$/;
 const PADDED_BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const BRANDED_HTML_PATHS = new Map<string, 'app' | 'share'>([
+	['/', 'app'],
+	['/index.html', 'app'],
+	['/share', 'share'],
+	['/share.html', 'share'],
+]);
 
 class ApiError extends Error {
 	constructor(
@@ -476,6 +486,18 @@ async function initializeVaultKeyCheck(env: AppEnv, vaultId: string, candidate: 
 
 async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 	const url = new URL(request.url);
+	const branding = getAppBranding(env);
+	const brandedPage = BRANDED_HTML_PATHS.get(url.pathname);
+	if (brandedPage) {
+		const assetResponse = await env.ASSETS.fetch(request);
+		if (request.method !== 'GET' || !assetResponse.ok) return assetResponse;
+		return rewriteBrandedHtml(assetResponse, branding, brandedPage);
+	}
+
+	if (url.pathname === '/manifest.webmanifest' && (request.method === 'GET' || request.method === 'HEAD')) {
+		return createBrandedManifest(branding, request.method === 'HEAD');
+	}
+
 	if (url.pathname.startsWith('/api/')) {
 		try {
 			await ensureApplicationSchema(env);
