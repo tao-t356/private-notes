@@ -39,42 +39,33 @@
 
 从旧版本升级后，如果数据库里仍有历史明文，页面会显示“待加密”。逐条打开并保存即可转换为客户端密文。
 
-## Fork 后部署
+## 一键部署
 
-项目不再提供 Deploy to Cloudflare 按钮。请先 [Fork 本仓库](https://github.com/tao-t356/private-notes/fork)，让自己的仓库保留 GitHub 上游关系。项目已经固定常规部署配置：Worker 名 `private-notes`、D1 名 `private-notes-db`、生产分支 `main`、构建检查和数据库 migrations，通常不需要修改代码或复制数据库 UUID。
+仓库地址：`https://github.com/tao-t356/private-notes`
 
-### 1. 导入 Fork
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/tao-t356/private-notes)
 
-1. 点击上面的 Fork 链接创建自己的仓库。
-2. 在 Cloudflare **Workers & Pages → Create application → Import a repository** 中选择自己的 Fork。
-3. 保留生产分支 `main`，Build command 留空，只把 Deploy command 设为：
+Cloudflare 会把项目克隆到你的 GitHub/GitLab 账号，自动创建 Worker 和独立 D1、写入数据库 ID、绑定静态资源，并识别仓库中的 `npm run build` / `npm run deploy` 命令。公开仓库不包含作者的 D1 ID，因此不会再引用其他账号的数据库。
 
-```text
-npm run deploy
+部署页面只需要修改 `APP_PASSWORD`：
+
+- 使用长且唯一的登录密码，建议至少 12 个字符并保存到密码管理器。
+- 6 位数字虽然可以登录，但无法抵御数据库泄露后的离线穷举。
+- 确认 Deploy command 是 `npm run deploy`，这样会在部署后应用 D1 migrations；不要改成单独的 `npx wrangler deploy`。
+
+`COOKIE_SECRET` 不需要填写。省略时，Worker 会在自己的 D1 中并发安全地生成每个部署独有的 256 位随机签名密钥。`APP_PASSWORDS`、`APP_NAME`、`APP_SHORT_NAME`、`APP_DESCRIPTION` 都是部署后的可选高级设置，普通用户无需操作。
+
+> Deploy Button 创建的是独立仓库，不是 GitHub Fork。这个项目升级频率较低，正常使用不需要配置同步。以后确实需要升级时，不要再次点击部署按钮，否则会创建新的 Worker/D1；应在原部署仓库中合并更新并继续复用现有数据库。
+
+### 可选：启用上游更新
+
+如需让独立部署仓库以后接收更新，先在 Cloudflare **Settings → Build → Branch control** 关闭非生产分支构建，再在该仓库终端运行：
+
+```bash
+npm run enable:updates -- --push
 ```
 
-4. 创建或选择一个用于 Workers Builds 的 API Token，至少包含 Account 级 **Workers Scripts: Edit** 和 **D1: Edit**。Cloudflare 自动生成的默认 Builds Token 当前不包含 D1 权限，不能完成自动建库和 migrations。
-5. 保存并部署。Wrangler 会自动创建 Worker 和 D1、绑定 `DB`，然后应用仓库中的 migrations；不需要先创建空 Worker、手建 D1 或把 UUID 提交到 Fork。
-
-> D1 automatic provisioning 当前是 Cloudflare Beta。项目锁定了 Wrangler 版本并固定资源名；从 GitHub 部署时 D1 ID 会保存在 Cloudflare，而不会回写到仓库。
-
-> 如果同一 Cloudflare 账号里已经存在同名资源：属于本项目的旧 Worker/D1 时应复用原部署；属于其他项目时，先在 Fork 的 `wrangler.jsonc` 同时修改 Worker `name` 和 D1 `database_name`，避免误连无关资源。普通新账号无需修改。
-
-### 2. 设置唯一必填项
-
-首次部署完成后，进入 Worker 的 **Settings → Variables & Secrets**，添加运行时 Secret `APP_PASSWORD` 并点击 Deploy。建议至少 12 个字符并保存到密码管理器；6 位数字虽然可以登录，但不能抵御数据库泄露后的离线穷举。
-
-在密码设置完成前，Worker 的 API 会主动返回 `503 auth_not_configured`，不会开放无密码访问。不要把密码设置成普通 Variable，也不要放到 Workers Builds 的 Build secret；Build secret 只属于构建环境，不是运行时 Secret。
-
-其他设置全部可选：`APP_PASSWORDS` 可增加隔离 vault；`COOKIE_SECRET` 省略时会在当前 D1 自动生成每个部署独有的 256 位随机密钥；`APP_NAME`、`APP_SHORT_NAME`、`APP_DESCRIPTION` 可用于自定义品牌。`keep_vars` 已开启，后续部署会保留 Dashboard 中的这些变量。
-
-### 3. 后续升级
-
-简单升级可在 GitHub 点击 **Sync fork → Update branch**，Cloudflare 会自动运行固定的 `npm run deploy`，先发布带 schema 门禁的新代码，再应用尚未执行的 D1 migrations；迁移窗口内 API 会 fail closed，迁移完成后自动恢复。
-
-更推荐在 Fork 的 **Actions → Sync upstream Private Notes** 运行安全更新 workflow。首次使用前在 Cloudflare **Settings → Build → Branch control** 关闭 **Builds for non-production branches**，避免尚未验证的更新分支接触生产 D1。Workflow 会保留 Worker/D1 身份和 Dashboard 变量，验证精确 commit 后创建 PR。
-
-> 旧 Deploy Button 创建的是独立仓库，GitHub 不能把它原地转换成 Fork。若旧仓库的 `package.json` 已有 `enable:updates`，可继续运行 `npm run enable:updates -- --push` 启用兼容更新 workflow。更早期、没有该命令的仓库不要直接运行它；最稳妥的迁移方式是 Fork 当前仓库，把旧部署的 Worker `name` 和现有 D1 的 `database_name` / `database_id` 写入新 Fork，再把现有 Worker 的 Builds 连接切换到新 Fork。运行时 Secrets 保留在原 Worker 中，不要新建或删除 D1，确认笔记正常后再归档旧代码仓库。
+随后可在 GitHub **Actions → Sync upstream Private Notes** 创建经过验证的升级 PR。升级工具会保留现有 Worker、D1 ID、routes、Secrets 和自定义变量。
 
 ## 手动部署
 
@@ -83,11 +74,11 @@ npm run deploy
 ```bash
 npm ci
 npx wrangler login
-npm run deploy
-npx wrangler secret put APP_PASSWORD
+npx wrangler deploy --secrets-file .dev.vars
+npm run db:migrations:apply
 ```
 
-`npm run deploy` 会自动创建/复用固定 D1，先部署带 schema 门禁的 Worker，再应用远程 migrations。CLI 部署可能把自动创建的 D1 ID 写回 `wrangler.jsonc`，这是当前账号的正常部署身份配置。生产升级应先在 staging D1 验证向后兼容性，并在迁移前记录 D1 Time Travel 恢复点。
+部署前复制 `.dev.vars.example` 为 `.dev.vars` 并替换 `APP_PASSWORD` 示例值；该文件已被 Git 忽略，不得提交。首次 `wrangler deploy` 会自动创建 D1 并把 ID 写回当前配置，随后 migrations 建立正式 schema。以后升级可直接运行 `npm run deploy`。生产升级应先在 staging D1 验证向后兼容性，并在迁移前记录 D1 Time Travel 恢复点。
 
 ## 本地开发
 
@@ -104,7 +95,7 @@ npx wrangler d1 migrations apply DB --local
 npm run dev
 ```
 
-`.dev.vars` 中的 `APP_PASSWORD` 只用于本地开发。线上首次部署允许在尚未设置密码时完成资源创建，但所有 API 会 fail closed；必须随后把 `APP_PASSWORD` 添加为 Worker 运行时 Secret。`COOKIE_SECRET` 可在 `.dev.vars` 中显式设置；省略、留空或保留两个已知示例值时，本地/线上 Worker 都会使用当前 D1 自动生成的随机密钥。自定义但少于 32 个字符的覆盖值会 fail closed。如果需要在本地测试额外 vault，可通过 Wrangler 的本地变量覆盖传入 `APP_PASSWORDS`。
+`wrangler.jsonc` 把 `APP_PASSWORD` 声明为 required secret；缺失时本地开发会警告，生产部署会明确失败。`COOKIE_SECRET` 可在 `.dev.vars` 中显式设置；省略、留空或保留两个已知示例值时，本地/线上 Worker 都会使用当前 D1 自动生成的随机密钥。自定义但少于 32 个字符的覆盖值会 fail closed。如果需要在本地测试额外 vault，可通过 Wrangler 的本地变量覆盖传入 `APP_PASSWORDS`。
 
 ## 从旧版本升级
 
@@ -210,6 +201,7 @@ wrangler.jsonc
 ## Cloudflare 参考
 
 - [Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/)
+- [Deploy to Cloudflare buttons](https://developers.cloudflare.com/workers/platform/deploy-buttons/)
 - [Workers Builds Git integration](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/)
 - [Workers Builds configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)
 - [Workers Builds branch control](https://developers.cloudflare.com/workers/ci-cd/builds/build-branches/)
@@ -219,4 +211,3 @@ wrangler.jsonc
 - [D1 Migrations](https://developers.cloudflare.com/d1/reference/migrations/)
 - [D1 Limits](https://developers.cloudflare.com/d1/platform/limits/)
 - [D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/)
-- [GitHub Syncing a fork](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/syncing-a-fork)

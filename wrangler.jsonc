@@ -13,6 +13,11 @@
 	"preview_urls": false,
 	"workers_dev": true,
 	"keep_vars": true,
+	"secrets": {
+		"required": [
+			"APP_PASSWORD"
+		]
+	},
 	"assets": {
 		"directory": "./public",
 		"binding": "ASSETS",
