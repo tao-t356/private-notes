@@ -41,6 +41,15 @@
       },
       "APP_PASSWORDS": {
         "description": "Optional additional isolated vaults. Format: vault_id=password,guest=another-password."
+      },
+      "APP_NAME": {
+        "description": "Public application brand name shown in the browser and share page. Default: `Private Notes`."
+      },
+      "APP_SHORT_NAME": {
+        "description": "Public short title shown in the app and when installed as a PWA. Default: `我的笔记`."
+      },
+      "APP_DESCRIPTION": {
+        "description": "Public application description used in page metadata and the PWA manifest."
       }
     }
   }

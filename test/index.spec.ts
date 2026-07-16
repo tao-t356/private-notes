@@ -97,6 +97,54 @@ describe('private-notes worker', () => {
 		expect(await sharePage.text()).toContain('查看并销毁');
 	});
 
+	it('applies public branding variables to app pages and the PWA manifest', async () => {
+		const brandedEnv = {
+			...env,
+			APP_NAME: 'Tao Notes',
+			APP_SHORT_NAME: '我的私人空间',
+			APP_DESCRIPTION: '只属于我的加密备忘录。',
+		} as Parameters<typeof worker.fetch>[1];
+
+		const appResponse = await worker.fetch(new Request(`${ORIGIN}/`), brandedEnv);
+		expect(appResponse.status).toBe(200);
+		const appHtml = await appResponse.text();
+		expect(appHtml).toContain('<title>Tao Notes</title>');
+		expect(appHtml).toContain('data-app-short-name="我的私人空间"');
+		expect(appHtml).toContain('>我的私人空间</h1>');
+		expect(appHtml).toContain('content="只属于我的加密备忘录。"');
+		expect(appResponse.headers.get('etag')).toBeNull();
+
+		const shareResponse = await worker.fetch(new Request(`${ORIGIN}/share`), brandedEnv);
+		expect(shareResponse.status).toBe(200);
+		expect(await shareResponse.text()).toContain('<div class="login-mini">Tao Notes</div>');
+
+		const manifestResponse = await worker.fetch(
+			new Request(`${ORIGIN}/manifest.webmanifest`),
+			brandedEnv
+		);
+		expect(manifestResponse.headers.get('content-type')).toContain('application/manifest+json');
+		await expect(manifestResponse.json()).resolves.toMatchObject({
+			name: 'Tao Notes',
+			short_name: '我的私人空间',
+			description: '只属于我的加密备忘录。',
+		});
+	});
+
+	it('normalizes branding values and escapes them when rewriting HTML', async () => {
+		const brandedEnv = {
+			...env,
+			APP_NAME: '  <script>alert(1)</script>  ',
+			APP_SHORT_NAME: '  \n  ',
+			APP_DESCRIPTION: 'first\nsecond',
+		} as Parameters<typeof worker.fetch>[1];
+		const response = await worker.fetch(new Request(`${ORIGIN}/`), brandedEnv);
+		const html = await response.text();
+		expect(html).not.toContain('<script>alert(1)</script>');
+		expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+		expect(html).toContain('data-app-short-name="我的笔记"');
+		expect(html).toContain('content="first second"');
+	});
+
 	it('round trips the real share crypto protocol and rejects tampering', async () => {
 		const payload = {
 			v: 1,
