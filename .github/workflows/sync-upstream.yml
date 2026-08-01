@@ -37,7 +37,7 @@ jobs:
           echo "Set Cloudflare Settings > Build > Deploy command to: npm run deploy"
           echo "Disable Cloudflare Settings > Build > Branch control > Builds for non-production branches."
           exit 1
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -89,7 +89,7 @@ jobs:
       contents: read
     steps:
       - name: Check out the exact inert commit with no persisted credentials
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           ref: ${{ needs.prepare-update.outputs.commit_sha }}
           fetch-depth: 1
