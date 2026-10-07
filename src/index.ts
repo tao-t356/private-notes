@@ -140,7 +140,8 @@ function contentTypeIsJson(request: Request) {
 
 function requireSameOriginNativeLogin(request: Request) {
 	const expectedOrigin = new URL(request.url).origin;
-	if (request.headers.get('origin') && request.headers.get('origin') !== expectedOrigin) {
+	const origin = request.headers.get('origin');
+	if (origin && origin !== 'null' && origin !== expectedOrigin) {
 		throw new ApiError(403, 'same_origin_required', 'native login form requires an exact same-origin Origin');
 	}
 }

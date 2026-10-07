@@ -156,6 +156,25 @@ describe('private-notes worker', () => {
 		expect(response.headers.get('set-cookie')).toMatch(/^__Host-session=[^;]+;/);
 	});
 
+	it('accepts Safari native login with an opaque Origin and a fresh one-time form token', async () => {
+		const { token, cookie } = await loginFormToken('203.0.113.246');
+
+		const response = await worker.fetch(new Request(`${ORIGIN}/api/login`, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+				'cf-connecting-ip': '203.0.113.246',
+				origin: 'null',
+				cookie,
+			},
+			body: new URLSearchParams({ password: DEFAULT_PASSWORD, login_csrf_token: token }),
+		}), env);
+
+		expect(response.status, `${response.status} ${response.headers.get('content-type')} ${await response.clone().text()}`).toBe(303);
+		expect(response.headers.get('location')).toBe('/');
+		expect(response.headers.get('set-cookie')).toMatch(/^__Host-session=[^;]+;/);
+	});
+
 	it('consumes Safari native login form tokens exactly once', async () => {
 		const { token, cookie } = await loginFormToken('203.0.113.244');
 		const makeRequest = () => worker.fetch(new Request(`${ORIGIN}/api/login`, {
