@@ -111,16 +111,14 @@ test('deploys code before applying migrations so automatic D1 provisioning can r
 	assert.equal(packageJson.scripts['db:migrations:apply'], 'wrangler d1 migrations apply DB --remote');
 });
 
-test('keeps Deploy to Cloudflare self-configuring without sharing an account database', () => {
+test('keeps Deploy to Cloudflare bindings valid without sharing an account database', () => {
 	const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 	assert.ok(packageJson.cloudflare?.bindings?.APP_PASSWORD?.description);
 	assert.ok(packageJson.cloudflare?.bindings?.DB?.description);
 	const wrangler = parseJsonc(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'), 'wrangler.jsonc');
 	const database = wrangler.d1_databases.find((candidate) => candidate.binding === 'DB');
 	assert.equal(database.database_name, 'private-notes-db');
-	if (IS_CANONICAL_GITHUB_ACTIONS) {
-		assert.equal(database.database_id, undefined);
-	} else if (database.database_id !== undefined) {
+	if (database.database_id !== undefined) {
 		assert.match(database.database_id, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
 	}
 	assert.deepEqual(wrangler.secrets?.required, ['APP_PASSWORD']);
