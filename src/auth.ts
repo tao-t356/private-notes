@@ -5,7 +5,7 @@ type AuthEnv = {
 	COOKIE_SECRET?: string;
 };
 
-export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 365;
 export const SESSION_COOKIE_NAME = '__Host-session';
 export const MAX_PASSWORD_LENGTH = 1024;
 export const LOGIN_CSRF_COOKIE_NAME = '__Host-login-csrf';
@@ -31,10 +31,15 @@ type VaultCredential = {
 	password: string;
 };
 
-type SessionData = {
+export type SessionData = {
 	authenticated: boolean;
 	vaultId: string;
+	setCookie?: string;
 };
+
+export function createSessionCookie(token: string) {
+	return `${SESSION_COOKIE_NAME}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}`;
+}
 
 function getCookie(request: Request, name: string) {
 	const cookie = request.headers.get('cookie') || '';
@@ -241,6 +246,7 @@ export async function createSessionToken(env: AuthEnv, vaultId = DEFAULT_VAULT_I
 			credential: await getCredentialFingerprint(env, credential),
 			iat: now,
 			exp: now + SESSION_MAX_AGE_SECONDS,
+			nonce: base64UrlEncode(crypto.getRandomValues(new Uint8Array(16))),
 		})
 	);
 	const signature = await hmacSha256Base64Url(env.COOKIE_SECRET!, payload);
@@ -259,6 +265,7 @@ async function verifySessionToken(env: AuthEnv, token: string) {
 		const data = JSON.parse(base64UrlDecode(payload)) as {
 			credential?: unknown;
 			exp?: unknown;
+			nonce?: unknown;
 			v?: unknown;
 			vaultId?: unknown;
 		};
@@ -292,9 +299,13 @@ export async function getSession(request: Request, env: AuthEnv): Promise<Sessio
 	const session = getCookie(request, SESSION_COOKIE_NAME);
 	if (!session) return { authenticated: false, vaultId: DEFAULT_VAULT_ID };
 	const vaultId = await verifySessionToken(env, session);
-	return vaultId
-		? { authenticated: true, vaultId }
-		: { authenticated: false, vaultId: DEFAULT_VAULT_ID };
+	if (!vaultId) return { authenticated: false, vaultId: DEFAULT_VAULT_ID };
+	const refreshedToken = await createSessionToken(env, vaultId);
+	return {
+		authenticated: true,
+		vaultId,
+		...(refreshedToken ? { setCookie: createSessionCookie(refreshedToken) } : {}),
+	};
 }
 
 function getClientIp(request: Request) {

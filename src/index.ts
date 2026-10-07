@@ -1,10 +1,10 @@
 import {
-	SESSION_MAX_AGE_SECONDS,
 	SESSION_COOKIE_NAME,
 	MAX_PASSWORD_LENGTH,
 	cleanupOldLoginRateLimits,
 	clearFailedLogins,
 	consumeLoginCsrfToken,
+	createSessionCookie,
 	createSessionToken,
 	getAuthConfigurationError,
 	getConfiguredVaultCount,
@@ -127,6 +127,42 @@ function withCommonHeaders(response: Response, requestId: string) {
 		statusText: response.statusText,
 		headers,
 	});
+}
+
+function withSessionCookie(response: Response, sessionCookie?: string) {
+	if (!sessionCookie) return response;
+	const headers = new Headers(response.headers);
+	headers.set('set-cookie', sessionCookie);
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	});
+}
+
+const SESSION_RENEWAL_EXCLUDED_PATHS = new Set([
+	'/api/session',
+	'/api/login',
+	'/api/login/form-token',
+	'/api/logout',
+]);
+
+async function renewActiveSessionCookie(request: Request, env: AppEnv, response: Response) {
+	const pathname = new URL(request.url).pathname;
+	if (!pathname.startsWith('/api/') || SESSION_RENEWAL_EXCLUDED_PATHS.has(pathname)) return response;
+
+	try {
+		const cookieSecret = await resolveCookieSecret(env);
+		const sessionEnv =
+			cookieSecret === env.COOKIE_SECRET
+				? env
+				: (Object.assign(Object.create(env), { COOKIE_SECRET: cookieSecret }) as AppEnv);
+		const session = await getSession(request, sessionEnv);
+		return withSessionCookie(response, session.setCookie);
+	} catch (error) {
+		console.error('Session renewal failed', error instanceof Error ? error.message : typeof error);
+		return response;
+	}
 }
 
 function getRequestId(request: Request) {
@@ -585,7 +621,11 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 
 	if (url.pathname === '/api/session' && request.method === 'GET') {
 		const session = await getSession(request, env);
-		return json({ ok: true, authenticated: session.authenticated, vaultId: session.vaultId });
+		return json(
+			{ ok: true, authenticated: session.authenticated, vaultId: session.vaultId },
+			200,
+			session.setCookie ? { 'set-cookie': session.setCookie } : {}
+		);
 	}
 
 	if (url.pathname === '/api/login/form-token' && request.method === 'GET') {
@@ -624,7 +664,7 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 		const token = await createSessionToken(env, vaultId);
 		if (!token) throw new Error('failed to create session token');
 
-		const sessionCookie = `${SESSION_COOKIE_NAME}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}`;
+		const sessionCookie = createSessionCookie(token);
 		if (nativeForm) {
 			return new Response(null, {
 				status: 303,
@@ -816,17 +856,20 @@ export default {
 	async fetch(request: Request, env: AppEnv): Promise<Response> {
 		const requestId = getRequestId(request);
 		try {
-			return withCommonHeaders(await handleRequest(request, env), requestId);
+			const response = await handleRequest(request, env);
+			return withCommonHeaders(await renewActiveSessionCookie(request, env, response), requestId);
 		} catch (error) {
 			if (error instanceof ApiError) {
+				const response = json({ ok: false, error: error.message, code: error.code }, error.status);
 				return withCommonHeaders(
-					json({ ok: false, error: error.message, code: error.code }, error.status),
+					await renewActiveSessionCookie(request, env, response),
 					requestId
 				);
 			}
 
 			console.error(`Unhandled request error (${requestId})`, error);
-			return withCommonHeaders(json({ ok: false, error: 'internal_error', requestId }, 500), requestId);
+			const response = json({ ok: false, error: 'internal_error', requestId }, 500);
+			return withCommonHeaders(await renewActiveSessionCookie(request, env, response), requestId);
 		}
 	},
 } satisfies ExportedHandler<Env>;

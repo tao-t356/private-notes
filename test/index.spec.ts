@@ -589,7 +589,7 @@ describe('private-notes worker', () => {
 		expect(setCookie).toMatch(/(?:^|;\s*)Secure(?:;|$)/i);
 		expect(setCookie).toMatch(/(?:^|;\s*)SameSite=Strict(?:;|$)/i);
 		expect(setCookie).toMatch(/(?:^|;\s*)Path=\/(?:;|$)/i);
-		expect(setCookie).toMatch(/(?:^|;\s*)Max-Age=2592000(?:;|$)/i);
+		expect(setCookie).toMatch(/(?:^|;\s*)Max-Age=31536000(?:;|$)/i);
 		expect(setCookie).not.toMatch(/(?:^|;\s*)Domain=/i);
 		expect(response.headers.get('x-request-id')).toBeTruthy();
 
@@ -602,6 +602,35 @@ describe('private-notes worker', () => {
 		});
 		expect(session.headers.get('x-request-id')).toBeTruthy();
 		expect(session.headers.get('x-frame-options')).toBe('DENY');
+	});
+
+	it('renews a valid active session with a fresh one-year hardened cookie', async () => {
+		const { cookie } = await login();
+		const renewed = await api('/api/session', { headers: { cookie } });
+		expect(renewed.status).toBe(200);
+		await expect(renewed.json()).resolves.toMatchObject({ authenticated: true, vaultId: 'default' });
+
+		const renewedSetCookie = renewed.headers.get('set-cookie') || '';
+		expect(renewedSetCookie).toMatch(/^__Host-session=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+;/);
+		expect(renewedSetCookie).toMatch(/(?:^|;\s*)HttpOnly(?:;|$)/i);
+		expect(renewedSetCookie).toMatch(/(?:^|;\s*)Secure(?:;|$)/i);
+		expect(renewedSetCookie).toMatch(/(?:^|;\s*)SameSite=Strict(?:;|$)/i);
+		expect(renewedSetCookie).toMatch(/(?:^|;\s*)Path=\/(?:;|$)/i);
+		expect(renewedSetCookie).toMatch(/(?:^|;\s*)Max-Age=31536000(?:;|$)/i);
+		expect(renewedSetCookie).not.toMatch(/(?:^|;\s*)Domain=/i);
+	const renewedCookie = cookieFrom(renewed);
+		expect(renewedCookie).not.toBe(cookie);
+
+		const stillActive = await api('/api/health', { headers: { cookie: renewedCookie } });
+		expect(stillActive.status).toBe(200);
+		await expect(stillActive.json()).resolves.toMatchObject({ ok: true, authEnabled: true });
+		const activeSetCookie = stillActive.headers.get('set-cookie') || '';
+		expect(activeSetCookie).toMatch(/^__Host-session=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+;/);
+		expect(activeSetCookie).toMatch(/(?:^|;\s*)HttpOnly(?:;|$)/i);
+		expect(activeSetCookie).toMatch(/(?:^|;\s*)Secure(?:;|$)/i);
+		expect(activeSetCookie).toMatch(/(?:^|;\s*)SameSite=Strict(?:;|$)/i);
+		expect(activeSetCookie).toMatch(/(?:^|;\s*)Path=\/(?:;|$)/i);
+		expect(activeSetCookie).toMatch(/(?:^|;\s*)Max-Age=31536000(?:;|$)/i);
 	});
 
 	it('rejects malformed login requests and incorrect passwords', async () => {
