@@ -24,6 +24,33 @@ test('share creation offers explicit one-time and reusable choices', async () =>
 	assert.match(app, /首次主动查看后立即失效/);
 });
 
+test('share result renders a local accessible QR and keeps copy-link fallback', async () => {
+	const [html, app, qr] = await Promise.all([
+		readProjectFile('public/index.html'),
+		readProjectFile('public/app.js'),
+		readProjectFile('public/qr.js'),
+	]);
+
+	assert.match(html, /id="shareQrPanel"/);
+	assert.match(html, /id="shareQr"[^>]*role="img"/);
+	assert.match(html, /id="shareQrTitle"/);
+	assert.match(html, /id="shareQrDescription"/);
+	assert.match(html, /id="copyShareLinkBtn"[^>]*>复制链接/);
+	assert.match(app, /import \{ createQrSvg \} from ['"]\.\/qr\.js['"]/);
+	assert.match(app, /shareUrl\.hash = encrypted\.keyFragment/);
+	assert.match(app, /createQrSvg\(shareUrlText\)/);
+	assert.match(app, /shareQr\.innerHTML/);
+	const hashIndex = app.indexOf('shareUrl.hash = encrypted.keyFragment');
+	const shareUrlTextIndex = app.indexOf('const shareUrlText = shareUrl.toString()', hashIndex);
+	const qrIndex = app.indexOf('createQrSvg(shareUrlText)', shareUrlTextIndex);
+	assert.ok(hashIndex >= 0 && shareUrlTextIndex > hashIndex && qrIndex > shareUrlTextIndex,
+		'the QR must receive the same complete URL after its secret fragment is attached');
+	assert.match(app, /二维码生成失败[\s\S]*复制链接/);
+	assert.doesNotMatch(app, /fetch\([^)]*shareUrl/);
+	assert.match(qr, /export function createQrSvg/);
+	assert.doesNotMatch(qr, /<script/i);
+});
+
 test('app headings use concise hierarchy copy and the share page distinguishes modes', async () => {
 	const [html, shareHtml, share] = await Promise.all([
 		readProjectFile('public/index.html'),

@@ -97,6 +97,30 @@ describe('private-notes worker', () => {
 		expect(await sharePage.text()).toContain('查看分享内容');
 	});
 
+	it('accepts the native URL-encoded login form and redirects back without weakening the session cookie', async () => {
+		const response = await worker.fetch(new Request(`${ORIGIN}/api/login`, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+				'cf-connecting-ip': '203.0.113.241',
+			},
+			body: new URLSearchParams({ password: DEFAULT_PASSWORD }),
+		}), env);
+
+		expect(response.status, `${response.status} ${response.headers.get('content-type')} ${await response.clone().text()}`).toBe(303);
+		expect(response.headers.get('location')).toBe('/');
+		const setCookie = response.headers.get('set-cookie') || '';
+		expect(setCookie).toMatch(/^__Host-session=[^;]+;/);
+		expect(setCookie).toContain('HttpOnly');
+		expect(setCookie).toContain('Secure');
+		expect(setCookie).toContain('SameSite=Strict');
+		expect(setCookie).toContain('Path=/');
+
+		const session = await api('/api/session', { headers: { cookie: cookieFrom(response) } });
+		expect(session.status).toBe(200);
+		await expect(session.json()).resolves.toMatchObject({ authenticated: true, vaultId: 'default' });
+	});
+
 	it('applies public branding variables to app pages and the PWA manifest', async () => {
 		const brandedEnv = {
 			...env,

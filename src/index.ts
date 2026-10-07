@@ -136,11 +136,7 @@ function contentTypeIsJson(request: Request) {
 	return request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() === 'application/json';
 }
 
-async function readJsonObject(request: Request, maxBytes: number) {
-	if (!contentTypeIsJson(request)) {
-		throw new ApiError(415, 'unsupported_media_type', 'content-type must be application/json');
-	}
-
+async function readBodyText(request: Request, maxBytes: number) {
 	const declaredLength = request.headers.get('content-length');
 	if (declaredLength && (/^\d+$/.test(declaredLength) === false || Number(declaredLength) > maxBytes)) {
 		throw new ApiError(413, 'payload_too_large', 'request body is too large');
@@ -163,6 +159,15 @@ async function readJsonObject(request: Request, maxBytes: number) {
 		text += decoder.decode(value, { stream: true });
 	}
 	text += decoder.decode();
+	return text;
+}
+
+async function readJsonObject(request: Request, maxBytes: number) {
+	if (!contentTypeIsJson(request)) {
+		throw new ApiError(415, 'unsupported_media_type', 'content-type must be application/json');
+	}
+
+	const text = await readBodyText(request, maxBytes);
 
 	let parsed: unknown;
 	try {
@@ -175,6 +180,18 @@ async function readJsonObject(request: Request, maxBytes: number) {
 		throw new ApiError(400, 'invalid_json', 'JSON object required');
 	}
 	return parsed as Record<string, unknown>;
+}
+
+async function readLoginBody(request: Request) {
+	const contentType = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
+	if (contentType === 'application/json') {
+		return { body: await readJsonObject(request, MAX_LOGIN_BODY_BYTES), nativeForm: false };
+	}
+	if (contentType === 'application/x-www-form-urlencoded') {
+		const text = await readBodyText(request, MAX_LOGIN_BODY_BYTES);
+		return { body: Object.fromEntries(new URLSearchParams(text)), nativeForm: true };
+	}
+	throw new ApiError(415, 'unsupported_media_type', 'login must use JSON or form encoding');
 }
 
 function requireCiphertextEnvelope(
@@ -556,7 +573,7 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 	}
 
 	if (url.pathname === '/api/login' && request.method === 'POST') {
-		const body = await readJsonObject(request, MAX_LOGIN_BODY_BYTES);
+		const { body, nativeForm } = await readLoginBody(request);
 		if (typeof body.password !== 'string' || !body.password || body.password.length > MAX_PASSWORD_LENGTH) {
 			throw new ApiError(400, 'invalid_password', 'password is required');
 		}
@@ -576,13 +593,19 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 		const token = await createSessionToken(env, vaultId);
 		if (!token) throw new Error('failed to create session token');
 
-		return json(
-			{ ok: true, vaultId },
-			200,
-			{
-				'set-cookie': `${SESSION_COOKIE_NAME}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}`,
-			}
-		);
+		const sessionCookie = `${SESSION_COOKIE_NAME}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}`;
+		if (nativeForm) {
+			return new Response(null, {
+				status: 303,
+				headers: {
+					'cache-control': 'no-store',
+					'location': '/',
+					'set-cookie': sessionCookie,
+					'x-content-type-options': 'nosniff',
+				},
+			});
+		}
+		return json({ ok: true, vaultId }, 200, { 'set-cookie': sessionCookie });
 	}
 
 	if (url.pathname === '/api/logout' && request.method === 'POST') {

@@ -16,30 +16,48 @@
   <body>
     <div class="page">
       <section id="loginView" class="login-wrap">
-        <form id="loginForm" class="card login-card" action="/api/login" method="post" autocomplete="on">
+        <div class="card login-card">
           <div class="login-brand">
             <div class="login-brand-icon">✎</div>
             <div>
               <div class="login-mini">Private Notes</div>
-              <h1 id="loginTitle" class="login-title">正在打开我的笔记</h1>
             </div>
           </div>
           <div id="unlockBadge" class="unlock-badge hidden">✓ 已通过访问验证，只需输入密码解锁内容</div>
-          <p id="loginDesc" class="login-desc">正在检查当前设备的访问状态，页面会保持在原位。</p>
+          <form id="loginForm" action="/api/login" method="post" autocomplete="on">
+            <h1 id="loginTitle" class="login-title">正在打开我的笔记</h1>
+            <p id="loginDesc" class="login-desc">正在检查当前设备的访问状态，页面会保持在原位。</p>
 
-          <div class="field-stack">
-            <label class="field-label" for="passwordInput">密码</label>
-            <input id="passwordInput" class="input" type="password" autocomplete="current-password" name="password" placeholder="请稍候…" />
-            <div id="passwordHelp" class="field-help">刷新时不再切换页面，只会显示这层锁屏。</div>
-          </div>
+            <div class="field-stack">
+              <label class="field-label" for="passwordInput">密码</label>
+              <input id="passwordInput" class="input" type="password" autocomplete="current-password" name="password" placeholder="请稍候…" required />
+              <div id="passwordHelp" class="field-help">刷新时不再切换页面，只会显示这层锁屏。</div>
+            </div>
 
-          <div class="login-actions">
-            <button id="loginBtn" class="btn login-submit" type="submit">进入笔记</button>
-            <button id="loginLogoutBtn" class="btn secondary login-logout hidden" type="button">退出当前会话</button>
-          </div>
+            <div class="login-actions">
+              <button id="loginBtn" class="btn login-submit" type="submit">进入笔记</button>
+            </div>
+          </form>
+
+          <form id="unlockForm" class="hidden" action="#" method="post" autocomplete="off">
+            <h1 id="unlockTitle" class="login-title">解锁我的笔记</h1>
+            <p id="unlockDesc" class="login-desc">站点访问会话仍然有效。请输入密码解锁本地加密内容。</p>
+
+            <div class="field-stack">
+              <label class="field-label" for="unlockPasswordInput">解锁密码</label>
+              <input id="unlockPasswordInput" class="input" type="password" autocomplete="off" placeholder="输入解锁密码" required />
+              <div class="field-help">只在当前页面内用于派生本地解密密钥；密码和密钥都不会持久化。</div>
+            </div>
+
+            <div class="login-actions">
+              <button id="loginUnlockBtn" class="btn login-submit" type="submit">解锁我的笔记</button>
+              <button id="loginLogoutBtn" class="btn secondary login-logout hidden" type="button">退出当前会话</button>
+            </div>
+          </form>
+
           <div class="security-note">客户端加密开启后，D1 只保存密文；搜索会在本地浏览器里完成。忘记密码将无法恢复旧密文。</div>
           <div id="loginStatus" class="login-foot"></div>
-        </form>
+        </div>
       </section>
 
       <section id="appView" class="app-dimmed">
@@ -66,7 +84,7 @@
           <p id="vaultPanelDesc" class="vault-panel-desc">请输入密码查看笔记内容。忘记密码将无法在页面内恢复旧密文。</p>
           <div class="field-stack">
             <label class="field-label" for="vaultUnlockInput">密码</label>
-            <input id="vaultUnlockInput" class="input" type="password" autocomplete="current-password" placeholder="输入密码" />
+            <input id="vaultUnlockInput" class="input" type="password" autocomplete="off" placeholder="输入密码" />
           </div>
           <div class="vault-panel-actions">
             <button id="unlockBtn" class="btn">解锁内容</button>
@@ -131,6 +149,11 @@
           <label id="shareLinkLabel" class="field-label" for="shareLinkInput">分享链接</label>
           <input id="shareLinkInput" class="input share-link-input" readonly autocomplete="off" spellcheck="false" />
           <p id="shareExpiryLabel" class="field-help"></p>
+          <div id="shareQrPanel" class="share-qr-panel hidden">
+            <h3 id="shareQrTitle" class="share-qr-title">扫码打开分享链接</h3>
+            <p id="shareQrDescription" class="share-qr-description">二维码包含完整分享链接，包括仅保存在二维码中的解密密钥。</p>
+            <div id="shareQr" class="share-qr" role="img" aria-labelledby="shareQrTitle shareQrDescription"></div>
+          </div>
           <button id="copyShareLinkBtn" class="btn" type="button">复制链接</button>
         </div>
 

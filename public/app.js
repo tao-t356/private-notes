@@ -1,4 +1,5 @@
 import { encryptSharedPayload } from './share-crypto.js';
+import { createQrSvg } from './qr.js';
 
 /**
  * @typedef {{ id: string, title: string, content: string, created_at: number, updated_at: number, revision: number }} RawNote
@@ -16,6 +17,8 @@ const KEY_CHECK_MARKER = 'private-notes-key-check:v1';
  * shareOperationId: number,
  * shareCreating: boolean,
  * shareReturnFocus: HTMLElement | null,
+ * loginSubmitting: boolean,
+ * unlockSubmitting: boolean,
  * expandedIds: Set<string>,
  * statusTimer: number | null,
  * sessionAuthenticated: boolean,
@@ -37,6 +40,8 @@ const state = {
   shareOperationId: 0,
   shareCreating: false,
   shareReturnFocus: null,
+  loginSubmitting: false,
+  unlockSubmitting: false,
   expandedIds: new Set(),
   statusTimer: null,
   sessionAuthenticated: false,
@@ -91,6 +96,7 @@ function getButton(id) {
 const els = {
   loginView: getElement('loginView'),
   loginForm: getElement('loginForm'),
+  unlockForm: getElement('unlockForm'),
   appView: getElement('appView'),
   unlockBadge: getElement('unlockBadge'),
   loginTitle: getElement('loginTitle'),
@@ -98,6 +104,10 @@ const els = {
   passwordInput: getInput('passwordInput'),
   passwordHelp: getElement('passwordHelp'),
   loginBtn: getButton('loginBtn'),
+  unlockTitle: getElement('unlockTitle'),
+  unlockDesc: getElement('unlockDesc'),
+  unlockPasswordInput: getInput('unlockPasswordInput'),
+  loginUnlockBtn: getButton('loginUnlockBtn'),
   loginLogoutBtn: getButton('loginLogoutBtn'),
   loginStatus: getElement('loginStatus'),
   topbar: getElement('topbar'),
@@ -130,6 +140,8 @@ const els = {
   shareLinkInput: getInput('shareLinkInput'),
   shareLinkLabel: getElement('shareLinkLabel'),
   shareExpiryLabel: getElement('shareExpiryLabel'),
+  shareQrPanel: getElement('shareQrPanel'),
+  shareQr: getElement('shareQr'),
   closeShareModalBtn: getButton('closeShareModalBtn'),
   cancelShareBtn: getButton('cancelShareBtn'),
   createShareBtn: getButton('createShareBtn'),
@@ -174,9 +186,12 @@ function updateModalUi() {
 function updateLoginMode() {
   const checking = state.authMode === 'checking';
   const unlockOnly = state.authMode === 'unlock' || (state.sessionAuthenticated && !state.vaultUnlocked);
+  els.loginForm.classList.toggle('hidden', unlockOnly);
+  els.unlockForm.classList.toggle('hidden', checking || !unlockOnly);
   els.unlockBadge.classList.toggle('hidden', !unlockOnly);
   els.loginLogoutBtn.classList.toggle('hidden', !unlockOnly);
-  els.loginBtn.disabled = checking;
+  els.loginBtn.disabled = checking || state.loginSubmitting;
+  els.loginUnlockBtn.disabled = !unlockOnly || state.unlockSubmitting;
   if (checking) {
     els.loginTitle.textContent = '正在打开' + state.appShortName;
     els.loginDesc.textContent = '正在检查当前设备的访问状态，页面会保持在原位。';
@@ -185,15 +200,14 @@ function updateLoginMode() {
     els.loginBtn.textContent = '请稍候…';
     return;
   }
-  els.loginTitle.textContent = unlockOnly ? '解锁' + state.appShortName : '登录到' + state.appShortName;
-  els.loginDesc.textContent = unlockOnly
-    ? '站点访问会话仍然有效。刷新会清除内存中的解密密钥；请重新输入密码解锁，不会再次登录。'
-    : '输入密码后即可进入应用，并在本地解锁你的加密笔记。';
-  els.passwordInput.placeholder = unlockOnly ? '输入解锁密码' : '输入访问密码';
-  els.passwordHelp.textContent = unlockOnly
-    ? '密码只在当前页面内用于派生本地解密密钥；刷新后需要重新解锁，密码和密钥都不会持久化。'
-    : '同一个密码同时用于访问站点和本地解密。';
-  els.loginBtn.textContent = unlockOnly ? '解锁' + state.appShortName : '进入笔记';
+  els.loginTitle.textContent = '登录到' + state.appShortName;
+  els.loginDesc.textContent = '输入密码后即可进入应用，并在本地解锁你的加密笔记。';
+  els.passwordInput.placeholder = '输入访问密码';
+  els.passwordHelp.textContent = '同一个密码同时用于访问站点和本地解密。';
+  els.loginBtn.textContent = state.loginSubmitting ? '登录中…' : '进入笔记';
+  els.unlockTitle.textContent = '解锁' + state.appShortName;
+  els.unlockDesc.textContent = '站点访问会话仍然有效。刷新会清除内存中的解密密钥；请重新输入密码解锁，不会再次登录。';
+  els.loginUnlockBtn.textContent = state.unlockSubmitting ? '解锁中…' : '解锁' + state.appShortName;
 }
 
 function updateVaultUi() {
@@ -233,6 +247,7 @@ function base64ToBytes(base64) {
 
 function clearSensitiveInputs() {
   els.passwordInput.value = '';
+  els.unlockPasswordInput.value = '';
   els.vaultUnlockInput.value = '';
 }
 
@@ -895,6 +910,8 @@ function openShareDialog(note) {
   els.shareResult.classList.add('hidden');
   els.shareLinkInput.value = '';
   els.shareExpiryLabel.textContent = '';
+  els.shareQr.textContent = '';
+  els.shareQrPanel.classList.add('hidden');
   els.createShareBtn.classList.remove('hidden');
   els.createShareBtn.disabled = false;
   els.createShareBtn.textContent = '创建分享链接';
@@ -918,6 +935,8 @@ function closeShareDialog(force) {
   els.shareModal.setAttribute('aria-hidden', 'true');
   els.shareLinkInput.value = '';
   els.shareResult.classList.add('hidden');
+  els.shareQr.textContent = '';
+  els.shareQrPanel.classList.add('hidden');
   state.sharingNoteId = null;
   state.shareReturnFocus = null;
   updateModalUi();
@@ -1012,7 +1031,17 @@ async function createShareLink() {
     const shareUrl = new URL('/share', window.location.origin);
     shareUrl.searchParams.set('t', token);
     shareUrl.hash = encrypted.keyFragment;
-    els.shareLinkInput.value = shareUrl.toString();
+    const shareUrlText = shareUrl.toString();
+    els.shareLinkInput.value = shareUrlText;
+    let qrReady = true;
+    try {
+      els.shareQr.innerHTML = createQrSvg(shareUrlText);
+      els.shareQrPanel.classList.remove('hidden');
+    } catch {
+      qrReady = false;
+      els.shareQr.textContent = '';
+      els.shareQrPanel.classList.add('hidden');
+    }
     els.shareLinkLabel.textContent = shareMode === 'one_time' ? '一次性分享链接' : '定时分享链接';
     els.shareExpiryLabel.textContent = shareMode === 'one_time'
         ? '最晚有效至 ' + formatDate(expiresAt) + '；首次主动查看后立即失效。'
@@ -1022,7 +1051,9 @@ async function createShareLink() {
     els.createShareBtn.classList.add('hidden');
     els.cancelShareBtn.textContent = '完成';
     els.copyShareLinkBtn.focus();
-    setStatus(shareMode === 'one_time' ? '阅后即焚链接已创建' : '定时分享链接已创建');
+    setStatus(qrReady
+      ? (shareMode === 'one_time' ? '阅后即焚链接已创建' : '定时分享链接已创建')
+      : '二维码生成失败，分享链接已创建，请复制链接');
   } catch (error) {
     if (!isCurrentShareOperation(operationId, noteId)) return;
     throw error;
@@ -1142,30 +1173,29 @@ async function checkSession() {
 
 els.loginForm.addEventListener('submit', async function (event) {
   event.preventDefault();
-  if (state.authMode === 'checking') return;
+  if (state.authMode === 'checking' || state.loginSubmitting) return;
+  state.loginSubmitting = true;
+  updateLoginMode();
   try {
-    const unlockOnly = state.sessionAuthenticated && !state.vaultUnlocked;
     let performedLogin = false;
-    els.loginStatus.textContent = unlockOnly ? '解锁中…' : '登录中…';
+    els.loginStatus.textContent = '登录中…';
     const password = els.passwordInput.value;
     if (!password) throw new Error('请输入密码');
-    if (!unlockOnly) {
-      await api('/api/login', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password: password })
-      });
-      const session = await api('/api/session');
-      if (!session.authenticated) {
-        throw new Error('服务器会话未能建立，请检查浏览器是否接受登录 Cookie 后重试');
-      }
-      performedLogin = true;
+    await api('/api/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: password })
+    });
+    const session = await api('/api/session');
+    if (!session.authenticated) {
+      throw new Error('服务器会话未能建立，请检查浏览器是否接受登录 Cookie 后重试');
     }
+    performedLogin = true;
     state.sessionAuthenticated = true;
     await unlockVault(password, performedLogin);
     clearSensitiveInputs();
     showApp();
-    setStatus(unlockOnly ? '已解锁' : '已登录并解锁');
+    setStatus('已登录并解锁');
 
     els.loginStatus.textContent = '';
   } catch (error) {
@@ -1180,6 +1210,35 @@ els.loginForm.addEventListener('submit', async function (event) {
       showLogin();
     }
     els.loginStatus.textContent = message;
+  } finally {
+    state.loginSubmitting = false;
+    updateLoginMode();
+  }
+});
+
+els.unlockForm.addEventListener('submit', async function (event) {
+  event.preventDefault();
+  if (state.unlockSubmitting) return;
+  state.unlockSubmitting = true;
+  updateLoginMode();
+  try {
+    els.loginStatus.textContent = '解锁中…';
+    await unlockVault(els.unlockPasswordInput.value, false);
+    clearSensitiveInputs();
+    showApp();
+    setStatus('已解锁');
+    els.loginStatus.textContent = '';
+  } catch (error) {
+    state.vaultUnlocked = false;
+    state.vaultKey = null;
+    const message = error instanceof Error ? error.message : '解锁失败';
+    state.unlockError = message;
+    await refreshMeta();
+    showLogin();
+    els.loginStatus.textContent = message;
+  } finally {
+    state.unlockSubmitting = false;
+    updateLoginMode();
   }
 });
 
