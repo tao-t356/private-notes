@@ -94,7 +94,7 @@ describe('private-notes worker', () => {
 		expect(sharePage.headers.get('content-type')).toContain('text/html');
 		expect(sharePage.headers.get('cache-control')).toBe('no-store');
 		expect(sharePage.headers.get('content-security-policy')).toContain("default-src 'self'");
-		expect(await sharePage.text()).toContain('查看并销毁');
+		expect(await sharePage.text()).toContain('查看分享内容');
 	});
 
 	it('applies public branding variables to app pages and the PWA manifest', async () => {
@@ -273,6 +273,7 @@ describe('private-notes worker', () => {
 					ciphertext: encrypted.ciphertext,
 					proof: encrypted.proof,
 					expiresInSeconds: 3600,
+					shareMode: 'one_time',
 				}),
 			}),
 			placeholderEnv
@@ -333,7 +334,10 @@ describe('private-notes worker', () => {
 			'0005_note_vaults.sql',
 			'0006_hardening.sql',
 			'0007_one_time_shares.sql',
+			'0008_reusable_shares.sql',
 		]);
+		const shareColumns = await env.DB.prepare('PRAGMA table_info(note_shares)').all<{ name: string }>();
+		expect((shareColumns.results ?? []).map((column) => column.name)).toContain('share_mode');
 		const noteColumns = await env.DB.prepare('PRAGMA table_info(notes)').all<{ name: string }>();
 		expect((noteColumns.results ?? []).map((column) => column.name)).toEqual([
 			'id',
@@ -678,7 +682,7 @@ describe('private-notes worker', () => {
 		const encrypted = await encryptSharedPayload(sharedPayload);
 		const proof = encrypted.proof;
 		const ciphertext = encrypted.ciphertext;
-		const createBody = JSON.stringify({ ciphertext, proof, expiresInSeconds: 86_400 });
+		const createBody = JSON.stringify({ ciphertext, proof, expiresInSeconds: 86_400, shareMode: 'one_time' });
 		const anonymousCreate = await api('/api/shares', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
@@ -690,14 +694,14 @@ describe('private-notes worker', () => {
 		const invalidCiphertext = await api('/api/shares', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json', cookie },
-			body: JSON.stringify({ ciphertext: encryptedValue('wrong-context'), proof, expiresInSeconds: 86_400 }),
+			body: JSON.stringify({ ciphertext: encryptedValue('wrong-context'), proof, expiresInSeconds: 86_400, shareMode: 'one_time' }),
 		});
 		expect(invalidCiphertext.status).toBe(400);
 
 		const invalidExpiry = await api('/api/shares', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json', cookie },
-			body: JSON.stringify({ ciphertext, proof, expiresInSeconds: 60 }),
+			body: JSON.stringify({ ciphertext, proof, expiresInSeconds: 60, shareMode: 'one_time' }),
 		});
 		expect(invalidExpiry.status).toBe(400);
 
@@ -713,11 +717,12 @@ describe('private-notes worker', () => {
 		expect(Number(created.expiresAt)).toBeGreaterThan(Date.now());
 
 		const stored = await env.DB.prepare(
-			'SELECT token_hash, proof_hash, ciphertext FROM note_shares LIMIT 1'
-		).first<{ token_hash: string; proof_hash: string; ciphertext: string }>();
+			'SELECT token_hash, proof_hash, ciphertext, share_mode FROM note_shares LIMIT 1'
+		).first<{ token_hash: string; proof_hash: string; ciphertext: string; share_mode: string }>();
 		expect(stored?.token_hash).not.toBe(token);
 		expect(stored?.proof_hash).not.toBe(proof);
 		expect(stored?.ciphertext).toBe(ciphertext);
+		expect(stored?.share_mode).toBe('one_time');
 
 		for (const method of ['GET', 'HEAD', 'OPTIONS']) {
 			const scannerRequest = await api(`/api/shares/${token}/consume`, { method });
@@ -767,6 +772,107 @@ describe('private-notes worker', () => {
 			.resolves.toMatchObject({ count: 0 });
 	});
 
+	it('requires an explicit share mode and keeps timed shares reusable until expiry', async () => {
+		const { cookie } = await login();
+		const encrypted = await encryptSharedPayload({
+			v: 1,
+			title: '定时标题',
+			content: '定时正文',
+			createdAt: Date.now() - 1000,
+			sharedAt: Date.now(),
+		});
+
+		const missingMode = await api('/api/shares', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json', cookie },
+			body: JSON.stringify({ ciphertext: encrypted.ciphertext, proof: encrypted.proof, expiresInSeconds: 86_400 }),
+		});
+		expect(missingMode.status).toBe(400);
+		await expect(missingMode.json()).resolves.toMatchObject({ code: 'invalid_share_mode' });
+
+		const invalidMode = await api('/api/shares', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json', cookie },
+			body: JSON.stringify({
+				ciphertext: encrypted.ciphertext,
+				proof: encrypted.proof,
+				expiresInSeconds: 86_400,
+				shareMode: 'reusable_forever',
+			}),
+		});
+		expect(invalidMode.status).toBe(400);
+		await expect(invalidMode.json()).resolves.toMatchObject({ code: 'invalid_share_mode' });
+
+		const before = Date.now();
+		const createdResponse = await api('/api/shares', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json', cookie },
+			body: JSON.stringify({
+				ciphertext: encrypted.ciphertext,
+				proof: encrypted.proof,
+				expiresInSeconds: 86_400,
+				shareMode: 'reusable',
+			}),
+		});
+		expect(createdResponse.status).toBe(201);
+		const created = await jsonBody(createdResponse);
+		expect(created).toMatchObject({ shareMode: 'reusable' });
+		expect(Number(created.expiresAt) - before).toBeGreaterThanOrEqual(86_400_000 - 1000);
+
+		const consumeRequest = () =>
+			api(`/api/shares/${String(created.token)}/consume`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ proof: encrypted.proof }),
+			});
+		const [first, second] = await Promise.all([consumeRequest(), consumeRequest()]);
+		expect(first.status).toBe(200);
+		expect(second.status).toBe(200);
+		await expect(jsonBody(first)).resolves.toMatchObject({
+			ok: true,
+			ciphertext: encrypted.ciphertext,
+			shareMode: 'reusable',
+		});
+		await expect(jsonBody(second)).resolves.toMatchObject({
+			ok: true,
+			ciphertext: encrypted.ciphertext,
+			shareMode: 'reusable',
+		});
+		await expect(env.DB.prepare('SELECT COUNT(*) AS count FROM note_shares').first<{ count: number }>())
+			.resolves.toMatchObject({ count: 1 });
+	});
+
+	it('deletes an expired reusable share during its first attempted view', async () => {
+		const { cookie } = await login();
+		const encrypted = await encryptSharedPayload({
+			v: 1,
+			title: '过期定时标题',
+			content: '过期定时正文',
+			createdAt: Date.now(),
+			sharedAt: Date.now(),
+		});
+		const created = await jsonBody(await api('/api/shares', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json', cookie },
+			body: JSON.stringify({
+				ciphertext: encrypted.ciphertext,
+				proof: encrypted.proof,
+				expiresInSeconds: 604_800,
+				shareMode: 'reusable',
+			}),
+		}));
+		await env.DB.prepare('UPDATE note_shares SET expires_at = 0').run();
+
+		const response = await api(`/api/shares/${String(created.token)}/consume`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ proof: encrypted.proof }),
+		});
+		expect(response.status).toBe(410);
+		await expect(env.DB.prepare('SELECT COUNT(*) AS count FROM note_shares').first<{ count: number }>())
+			.resolves.toMatchObject({ count: 0 });
+	});
+
 	it('deletes expired shares without returning their ciphertext', async () => {
 		const { cookie } = await login();
 		const encrypted = await encryptSharedPayload({
@@ -785,6 +891,7 @@ describe('private-notes worker', () => {
 					ciphertext: encrypted.ciphertext,
 					proof,
 					expiresInSeconds: 3600,
+					shareMode: 'reusable',
 				}),
 			})
 		);

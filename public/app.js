@@ -128,6 +128,7 @@ const els = {
   shareSetup: getElement('shareSetup'),
   shareResult: getElement('shareResult'),
   shareLinkInput: getInput('shareLinkInput'),
+  shareLinkLabel: getElement('shareLinkLabel'),
   shareExpiryLabel: getElement('shareExpiryLabel'),
   closeShareModalBtn: getButton('closeShareModalBtn'),
   cancelShareBtn: getButton('cancelShareBtn'),
@@ -888,7 +889,7 @@ function openShareDialog(note) {
   state.shareReturnFocus = activeElement instanceof HTMLElement ? activeElement : null;
   state.shareOperationId += 1;
   state.sharingNoteId = note.id;
-  els.shareNoteLabel.textContent = '分享“' + (note.title || '无标题') + '”';
+  els.shareNoteLabel.textContent = '分享“' + (note.title || '无标题') + '”，原笔记不受影响';
   els.shareExpiry.value = '86400';
   els.shareSetup.classList.remove('hidden');
   els.shareResult.classList.add('hidden');
@@ -896,7 +897,7 @@ function openShareDialog(note) {
   els.shareExpiryLabel.textContent = '';
   els.createShareBtn.classList.remove('hidden');
   els.createShareBtn.disabled = false;
-  els.createShareBtn.textContent = '创建一次性链接';
+  els.createShareBtn.textContent = '创建分享链接';
   els.cancelShareBtn.textContent = '取消';
   els.shareModal.classList.remove('hidden');
   els.shareModal.setAttribute('aria-hidden', 'false');
@@ -930,7 +931,7 @@ function setShareCreating(creating) {
   els.closeShareModalBtn.disabled = creating;
   els.cancelShareBtn.disabled = creating;
   els.createShareBtn.disabled = creating;
-  els.createShareBtn.textContent = creating ? '加密并创建中…' : '创建一次性链接';
+  els.createShareBtn.textContent = creating ? '加密并创建中…' : '创建分享链接';
   if (creating) {
     els.shareModal.setAttribute('aria-busy', 'true');
     els.shareModal.focus();
@@ -947,9 +948,9 @@ function isCurrentShareOperation(operationId, noteId) {
 }
 
 /**
- * A forced close is not exposed in the UI, but if another application action
- * invalidates a completed request, consume its newly-created record so it
- * cannot remain as an unreachable orphan.
+ * A forced close is not exposed in the UI. One-time records created by an
+ * invalidated request are consumed so they cannot remain as unreachable
+ * orphans; reusable records remain available until their normal expiry.
  * @param {string} token
  * @param {string} proof
  */
@@ -976,6 +977,11 @@ async function createShareLink() {
   if (![3600, 86400, 604800].includes(expiresInSeconds)) {
     throw new Error('请选择有效的链接期限');
   }
+  const selectedOption = els.shareExpiry.options[els.shareExpiry.selectedIndex];
+  const shareMode = selectedOption?.dataset.shareMode;
+  if (shareMode !== 'one_time' && shareMode !== 'reusable') {
+    throw new Error('请选择有效的分享方式');
+  }
 
   const noteId = note.id;
   const operationId = ++state.shareOperationId;
@@ -988,7 +994,8 @@ async function createShareLink() {
       body: JSON.stringify({
         ciphertext: encrypted.ciphertext,
         proof: encrypted.proof,
-        expiresInSeconds: expiresInSeconds
+        expiresInSeconds: expiresInSeconds,
+        shareMode: shareMode
       })
     });
     const token = String(data.token || '');
@@ -998,7 +1005,7 @@ async function createShareLink() {
     }
 
     if (!isCurrentShareOperation(operationId, noteId)) {
-      await discardStaleShare(token, encrypted.proof);
+      if (shareMode === 'one_time') await discardStaleShare(token, encrypted.proof);
       return;
     }
 
@@ -1006,13 +1013,16 @@ async function createShareLink() {
     shareUrl.searchParams.set('t', token);
     shareUrl.hash = encrypted.keyFragment;
     els.shareLinkInput.value = shareUrl.toString();
-    els.shareExpiryLabel.textContent = '最晚有效至 ' + formatDate(expiresAt) + '；首次主动查看后立即失效。';
+    els.shareLinkLabel.textContent = shareMode === 'one_time' ? '一次性分享链接' : '定时分享链接';
+    els.shareExpiryLabel.textContent = shareMode === 'one_time'
+        ? '最晚有效至 ' + formatDate(expiresAt) + '；首次主动查看后立即失效。'
+        : '有效至 ' + formatDate(expiresAt) + '；可在期限内重复查看。';
     els.shareSetup.classList.add('hidden');
     els.shareResult.classList.remove('hidden');
     els.createShareBtn.classList.add('hidden');
     els.cancelShareBtn.textContent = '完成';
     els.copyShareLinkBtn.focus();
-    setStatus('一次性分享链接已创建');
+    setStatus(shareMode === 'one_time' ? '阅后即焚链接已创建' : '定时分享链接已创建');
   } catch (error) {
     if (!isCurrentShareOperation(operationId, noteId)) return;
     throw error;

@@ -1,7 +1,7 @@
 import { createShareProof, decryptSharedPayload, parseShareKeyFragment } from './share-crypto.js';
 
 /**
- * @typedef {{ token: string, keyBytes: Uint8Array }} ShareLinkData
+ * @typedef {{ token: string, keyBytes: Uint8Array, shareMode: 'one_time' | 'reusable' | null }} ShareLinkData
  * @typedef {{ v: 1, title: string, content: string, createdAt: number, sharedAt: number }} SharedNotePayload
  */
 
@@ -48,7 +48,7 @@ function parseShareLink() {
     throw new Error('分享链接不完整或格式无效');
   }
   const keyBytes = parseShareKeyFragment(fragment);
-  return { token: token, keyBytes: keyBytes };
+  return { token: token, keyBytes: keyBytes, shareMode: null };
 }
 
 /** @param {unknown} value @returns {SharedNotePayload} */
@@ -87,10 +87,17 @@ function clearPageContent() {
   linkData = null;
 }
 
+function clearDisplayedNote() {
+  els.title.textContent = '';
+  els.content.textContent = '';
+  els.meta.textContent = '';
+  els.note.classList.add('hidden');
+}
+
 async function consumeShare() {
   if (!linkData) throw new Error('分享链接缺少解密密钥');
   els.consumeBtn.disabled = true;
-  setStatus('正在领取并从当前在线数据库删除密文…');
+  setStatus(linkData.shareMode === 'one_time' ? '正在查看并使一次性链接失效…' : '正在加载分享内容…');
   const proof = await createShareProof(linkData.keyBytes);
   const response = await fetch('/api/shares/' + encodeURIComponent(linkData.token) + '/consume', {
     method: 'POST',
@@ -101,25 +108,49 @@ async function consumeShare() {
   const data = await response.json().catch(function () { return {}; });
   if (!response.ok) {
     if (response.status === 410 && data.code === 'share_unavailable') {
+      const wasReusable = linkData?.shareMode === 'reusable';
       clearPageContent();
-      throw new Error('这条分享已被查看、已过期或链接不完整');
+      els.consumeBtn.disabled = true;
+      throw new Error(wasReusable
+        ? '这条定时分享已过期或链接不完整'
+        : '这条分享已被查看、已过期或链接不完整');
     }
     throw new Error('暂时无法领取分享内容');
   }
 
   try {
     const payload = validatePayload(await decryptSharedPayload(data.ciphertext, linkData.keyBytes));
-    linkData.keyBytes.fill(0);
-    linkData = null;
-    els.meta.textContent = '原笔记创建于 ' + formatDate(payload.createdAt) + ' · 在线 D1 记录已删除';
+    const shareMode = data.shareMode === 'reusable' ? 'reusable' : 'one_time';
+    linkData.shareMode = shareMode;
+    if (shareMode === 'one_time') {
+      linkData.keyBytes.fill(0);
+      linkData = null;
+    } else {
+      els.consumeBtn.disabled = false;
+      els.consumeBtn.textContent = '再次查看';
+    }
+    els.meta.textContent = shareMode === 'one_time'
+      ? '原笔记创建于 ' + formatDate(payload.createdAt) + ' · 查看后立即失效'
+      : '原笔记创建于 ' + formatDate(payload.createdAt) + ' · 期限内可重复查看';
     els.title.textContent = payload.title || '无标题';
     els.content.textContent = payload.content || '这条笔记没有正文。';
-    els.intro.classList.add('hidden');
+    if (shareMode === 'one_time') {
+      els.intro.classList.add('hidden');
+    } else {
+      els.intro.classList.remove('hidden');
+    }
     els.note.classList.remove('hidden');
-    setStatus('已解密；关闭或刷新页面后无法再次获取。');
+    setStatus(shareMode === 'one_time' ? '已查看；一次性链接已失效。' : '已查看；链接在有效期内仍可再次查看。');
   } catch (error) {
-    clearPageContent();
-    throw new Error('在线 D1 记录已删除，但当前链接无法解密这条内容');
+    if (data.shareMode === 'reusable' && linkData) {
+      clearDisplayedNote();
+      els.consumeBtn.disabled = false;
+    } else {
+      clearPageContent();
+    }
+    throw new Error(data.shareMode === 'reusable'
+      ? '分享记录仍可使用，但当前链接无法解密这条内容'
+      : '分享记录已处理，但当前链接无法解密这条内容');
   }
 }
 
@@ -131,8 +162,13 @@ els.consumeBtn.onclick = function () {
 };
 
 els.clearBtn.onclick = function () {
-  clearPageContent();
-  setStatus('当前页面中的明文已清除。');
+  if (linkData?.shareMode === 'reusable') {
+    clearDisplayedNote();
+    setStatus('当前页面中的明文已清除，可再次查看。');
+  } else {
+    clearPageContent();
+    setStatus('当前页面中的明文已清除。');
+  }
 };
 
 window.addEventListener('pagehide', clearPageContent);
@@ -140,7 +176,7 @@ window.addEventListener('pagehide', clearPageContent);
 try {
   linkData = parseShareLink();
   els.consumeBtn.disabled = false;
-  setStatus('链接有效。内容尚未领取，在线 D1 记录仍存在。');
+  setStatus('链接有效。点击“查看分享内容”后加载明文。');
 } catch (error) {
   els.consumeBtn.disabled = true;
   setStatus(error instanceof Error ? error.message : '分享链接无效', true);

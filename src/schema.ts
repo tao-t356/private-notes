@@ -11,6 +11,7 @@ const APPLIED_MIGRATIONS = [
 	'0005_note_vaults.sql',
 	'0006_hardening.sql',
 	'0007_one_time_shares.sql',
+	'0008_reusable_shares.sql',
 ] as const;
 
 const schemaChecks = new WeakMap<object, Promise<void>>();
@@ -87,7 +88,8 @@ async function initializeFreshDatabase(db: D1Database) {
 			 vault_id TEXT NOT NULL,
 			 ciphertext TEXT NOT NULL,
 			 created_at INTEGER NOT NULL,
-			 expires_at INTEGER NOT NULL
+			 expires_at INTEGER NOT NULL,
+			 share_mode TEXT NOT NULL DEFAULT 'one_time'
 			)`
 		),
 		db.prepare(

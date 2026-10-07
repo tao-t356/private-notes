@@ -65,10 +65,10 @@ export function rewriteBrandedHtml(response: Response, branding: AppBranding, pa
 			.on('#topbarTitle', replaceText(branding.shortName));
 	} else {
 		rewriter = rewriter
-			.on('title', replaceText(`一次性笔记 · ${branding.name}`))
+			.on('title', replaceText(`查看分享 · ${branding.name}`))
 			.on(
 				'meta[name="description"]',
-				replaceAttribute('content', `查看一条客户端加密、阅后即焚的 ${branding.name} 分享。`)
+				replaceAttribute('content', `查看一条客户端加密的 ${branding.name} 分享。`)
 			);
 	}
 

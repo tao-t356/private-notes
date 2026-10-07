@@ -43,7 +43,10 @@ type NoteCursor = {
 type NoteShare = {
 	ciphertext: string;
 	expires_at: number;
+	share_mode: ShareMode;
 };
+
+type ShareMode = 'one_time' | 'reusable';
 
 type ShareToken = {
 	id: string;
@@ -262,6 +265,13 @@ function requireShareTtl(value: unknown) {
 	return value as number;
 }
 
+function requireShareMode(value: unknown): ShareMode {
+	if (value !== 'one_time' && value !== 'reusable') {
+		throw new ApiError(400, 'invalid_share_mode', 'shareMode must be one_time or reusable');
+	}
+	return value;
+}
+
 async function hashShareSecret(namespace: 'proof' | 'token', value: string) {
 	const digest = await crypto.subtle.digest(
 		'SHA-256',
@@ -393,7 +403,8 @@ async function createNoteShare(
 	vaultId: string,
 	ciphertext: string,
 	proof: string,
-	expiresInSeconds: number
+	expiresInSeconds: number,
+	shareMode: ShareMode
 ) {
 	const now = Date.now();
 	const expiresAt = now + expiresInSeconds * 1000;
@@ -406,14 +417,14 @@ async function createNoteShare(
 		const signature = await signShareToken(env, tokenId, proofHash);
 		const token = `${tokenId}.${proofHash}.${signature}`;
 		const created = await env.DB.prepare(
-			`INSERT INTO note_shares (token_hash, proof_hash, vault_id, ciphertext, created_at, expires_at)
-			 VALUES (?, ?, ?, ?, ?, ?)
+			`INSERT INTO note_shares (token_hash, proof_hash, vault_id, ciphertext, created_at, expires_at, share_mode)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(token_hash) DO NOTHING
-			 RETURNING expires_at`
+			 RETURNING expires_at, share_mode`
 		)
-			.bind(tokenHash, proofHash, vaultId, ciphertext, now, expiresAt)
-			.first<{ expires_at: number }>();
-		if (created) return { token, expiresAt: created.expires_at };
+			.bind(tokenHash, proofHash, vaultId, ciphertext, now, expiresAt, shareMode)
+			.first<{ expires_at: number; share_mode: ShareMode }>();
+		if (created) return { token, expiresAt: created.expires_at, shareMode: created.share_mode };
 	}
 
 	throw new Error('failed to allocate a unique share token');
@@ -431,16 +442,38 @@ async function consumeNoteShare(env: AppEnv, parsedToken: ShareToken, proof: str
 		return null;
 	}
 	const tokenHash = await hashShareSecret('token', parsedToken.id);
-	const share = await env.DB.prepare(
+	const oneTimeShare = await env.DB.prepare(
 		`DELETE FROM note_shares
-		 WHERE token_hash = ? AND proof_hash = ?
-		 RETURNING ciphertext, expires_at`
+		 WHERE token_hash = ? AND proof_hash = ? AND share_mode = 'one_time'
+		 RETURNING ciphertext, expires_at, share_mode`
+	)
+		.bind(tokenHash, parsedToken.proofHash)
+		.first<NoteShare>();
+
+	if (oneTimeShare) {
+		if (oneTimeShare.expires_at <= Date.now()) return null;
+		return oneTimeShare;
+	}
+
+	const share = await env.DB.prepare(
+		`SELECT ciphertext, expires_at, share_mode
+		 FROM note_shares
+		 WHERE token_hash = ? AND proof_hash = ? AND share_mode = 'reusable'
+		 LIMIT 1`
 	)
 		.bind(tokenHash, parsedToken.proofHash)
 		.first<NoteShare>();
 
 	if (!share) return null;
-	if (share.expires_at <= Date.now()) return null;
+	if (share.expires_at <= Date.now()) {
+		await env.DB.prepare(
+			`DELETE FROM note_shares
+			 WHERE token_hash = ? AND proof_hash = ? AND share_mode = 'reusable' AND expires_at <= ?`
+		)
+			.bind(tokenHash, parsedToken.proofHash, Date.now())
+			.run();
+		return null;
+	}
 	return share;
 }
 
@@ -569,7 +602,12 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 		const proof = requireShareProof(body.proof);
 		const share = await consumeNoteShare(env, token, proof);
 		return share
-			? json({ ok: true, ciphertext: share.ciphertext, expiresAt: share.expires_at })
+			? json({
+					ok: true,
+					ciphertext: share.ciphertext,
+					expiresAt: share.expires_at,
+					shareMode: share.share_mode,
+				})
 			: shareUnavailable();
 	}
 
@@ -582,8 +620,9 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 		const ciphertext = requireShareCiphertext(body.ciphertext);
 		const proof = requireShareProof(body.proof);
 		const expiresInSeconds = requireShareTtl(body.expiresInSeconds);
-		const share = await createNoteShare(env, vaultId, ciphertext, proof, expiresInSeconds);
-		return json({ ok: true, token: share.token, expiresAt: share.expiresAt }, 201);
+		const shareMode = requireShareMode(body.shareMode);
+		const share = await createNoteShare(env, vaultId, ciphertext, proof, expiresInSeconds, shareMode);
+		return json({ ok: true, token: share.token, expiresAt: share.expiresAt, shareMode: share.shareMode }, 201);
 	}
 
 	if (url.pathname === '/api/health' && request.method === 'GET') {

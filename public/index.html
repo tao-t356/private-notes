@@ -46,7 +46,7 @@
         <header id="topbar" class="card topbar hidden-when-modal">
           <div>
             <h1 id="topbarTitle" class="topbar-title">我的笔记</h1>
-            <div class="topbar-subtitle">客户端加密 · 内存解锁 · 本地搜索</div>
+            <div class="topbar-subtitle">加密保存 · 本地解锁 · 快速搜索</div>
           </div>
           <div class="topbar-actions">
             <div class="search-wrap">
@@ -78,7 +78,7 @@
             <div class="section-head">
               <div>
                 <h2 class="section-title">全部笔记</h2>
-                <div class="section-desc">按更新时间排序，支持直接复制内容。</div>
+                <div class="section-desc">按最近更新排列，支持搜索、编辑、复制和分享。</div>
               </div>
               <div id="noteCount" class="muted">0 条</div>
             </div>
@@ -111,8 +111,8 @@
       <div class="card modal-card share-modal-card">
         <div class="modal-head">
           <div>
-            <h2 id="shareModalTitle" class="section-title">创建阅后即焚链接</h2>
-            <div id="shareNoteLabel" class="section-desc">内容会使用一次性随机密钥重新加密。</div>
+            <h2 id="shareModalTitle" class="section-title">创建分享链接</h2>
+            <div id="shareNoteLabel" class="section-desc">内容会使用新的随机密钥重新加密，原笔记不受影响。</div>
           </div>
           <button id="closeShareModalBtn" class="btn secondary" type="button">关闭</button>
         </div>
@@ -120,15 +120,15 @@
         <div id="shareSetup">
           <label class="field-label" for="shareExpiry">链接有效期</label>
           <select id="shareExpiry" class="input share-select">
-            <option value="3600">1 小时</option>
-            <option value="86400" selected>24 小时</option>
-            <option value="604800">7 天</option>
+            <option value="3600" data-share-mode="one_time">阅后即焚（一次性）</option>
+            <option value="86400" data-share-mode="reusable" selected>24 小时有效</option>
+            <option value="604800" data-share-mode="reusable">7 天有效</option>
           </select>
-          <p class="share-warning">原笔记不会被删除。完整链接等同访问权，请只通过可信渠道发送。主动查看会先删除分享记录再传回密文，领取途中断网也可能无法重试；普通 GET 预览不会触发，但 D1 Time Travel、备份、主动安全扫描与截图不受此保证。</p>
+          <p class="share-warning">原笔记不会被删除。一次性链接仅可主动查看一次；定时链接在有效期内可重复查看。完整链接等同访问权，请只通过可信渠道发送；普通 GET 预览不会触发查看。</p>
         </div>
 
         <div id="shareResult" class="share-result hidden" role="status">
-          <label class="field-label" for="shareLinkInput">一次性分享链接</label>
+          <label id="shareLinkLabel" class="field-label" for="shareLinkInput">分享链接</label>
           <input id="shareLinkInput" class="input share-link-input" readonly autocomplete="off" spellcheck="false" />
           <p id="shareExpiryLabel" class="field-help"></p>
           <button id="copyShareLinkBtn" class="btn" type="button">复制链接</button>
@@ -136,7 +136,7 @@
 
         <div class="modal-actions">
           <button id="cancelShareBtn" class="btn secondary" type="button">取消</button>
-          <button id="createShareBtn" class="btn" type="button">创建一次性链接</button>
+          <button id="createShareBtn" class="btn" type="button">创建分享链接</button>
         </div>
       </div>
     </div>
