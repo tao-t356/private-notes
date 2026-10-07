@@ -103,6 +103,7 @@ describe('private-notes worker', () => {
 			headers: {
 				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
 				'cf-connecting-ip': '203.0.113.241',
+				origin: ORIGIN,
 			},
 			body: new URLSearchParams({ password: DEFAULT_PASSWORD }),
 		}), env);
@@ -119,6 +120,26 @@ describe('private-notes worker', () => {
 		const session = await api('/api/session', { headers: { cookie: cookieFrom(response) } });
 		expect(session.status).toBe(200);
 		await expect(session.json()).resolves.toMatchObject({ authenticated: true, vaultId: 'default' });
+	});
+
+	it('rejects native URL-encoded login without an exact same-origin Origin', async () => {
+		for (const origin of [undefined, 'https://attacker.example']) {
+			const headers = new Headers({
+				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+				'cf-connecting-ip': origin ? '203.0.113.242' : '203.0.113.243',
+			});
+			if (origin) headers.set('origin', origin);
+
+			const response = await worker.fetch(new Request(`${ORIGIN}/api/login`, {
+				method: 'POST',
+				headers,
+				body: new URLSearchParams({ password: DEFAULT_PASSWORD }),
+			}), env);
+
+			expect(response.status).toBe(403);
+			expect(response.headers.get('set-cookie')).toBeNull();
+			await expect(response.json()).resolves.toMatchObject({ code: 'same_origin_required' });
+		}
 	});
 
 	it('applies public branding variables to app pages and the PWA manifest', async () => {

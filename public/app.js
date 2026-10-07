@@ -1223,7 +1223,7 @@ els.unlockForm.addEventListener('submit', async function (event) {
   updateLoginMode();
   try {
     els.loginStatus.textContent = '解锁中…';
-    await unlockVault(els.unlockPasswordInput.value, false);
+    await unlockVault(els.unlockPasswordInput.value, true);
     clearSensitiveInputs();
     showApp();
     setStatus('已解锁');

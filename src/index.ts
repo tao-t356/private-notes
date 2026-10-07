@@ -136,6 +136,13 @@ function contentTypeIsJson(request: Request) {
 	return request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() === 'application/json';
 }
 
+function requireSameOriginNativeLogin(request: Request) {
+	const expectedOrigin = new URL(request.url).origin;
+	if (request.headers.get('origin') !== expectedOrigin) {
+		throw new ApiError(403, 'same_origin_required', 'native login form requires an exact same-origin Origin');
+	}
+}
+
 async function readBodyText(request: Request, maxBytes: number) {
 	const declaredLength = request.headers.get('content-length');
 	if (declaredLength && (/^\d+$/.test(declaredLength) === false || Number(declaredLength) > maxBytes)) {
@@ -574,6 +581,7 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 
 	if (url.pathname === '/api/login' && request.method === 'POST') {
 		const { body, nativeForm } = await readLoginBody(request);
+		if (nativeForm) requireSameOriginNativeLogin(request);
 		if (typeof body.password !== 'string' || !body.password || body.password.length > MAX_PASSWORD_LENGTH) {
 			throw new ApiError(400, 'invalid_password', 'password is required');
 		}

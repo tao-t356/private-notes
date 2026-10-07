@@ -44,6 +44,8 @@ test('mobile login uses a native password form with a handled submit event', asy
 	const localUnlock = app.indexOf('await unlockVault(password, performedLogin)', loginRequest);
 	assert.ok(sessionProbe > loginRequest && localUnlock > sessionProbe,
 		'the browser must verify its cookie-backed session before deriving the local vault key');
+	assert.match(app, /await unlockVault\(els\.unlockPasswordInput\.value, true\)/,
+		'the authenticated native-form fallback must initialize a missing key check after verifying existing notes');
 	assert.match(app, /站点访问会话仍然有效[\s\S]*不会再次登录/);
 	assert.match(`${html}\n${app}`, /(?:密码和密钥都不会持久化|只在当前页面内用于派生本地解密密钥)/);
 	assert.doesNotMatch(app, /els\.passwordInput\.addEventListener\(["']keydown["']/,
