@@ -1,12 +1,82 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 
 const root = new URL('../', import.meta.url);
 
 async function readProjectFile(path) {
 	return readFile(new URL(path, root), 'utf8');
 }
+
+async function loadLoginWithSessionProbe() {
+	const source = await readProjectFile('public/login-flow.js');
+	const context = { result: null };
+	runInNewContext(source.replace(/export\s+/g, '') + '\nresult = loginWithSessionProbe;', context);
+	return context.result;
+}
+
+test('Safari falls back to the native form only after an unauthenticated session probe', async () => {
+	const loginWithSessionProbe = await loadLoginWithSessionProbe();
+	const calls = [];
+	const events = [];
+	let nativeFallbacks = 0;
+	const request = async (url, options) => {
+		events.push(`request:${url}`);
+		calls.push({ url, options });
+		if (url === '/api/login') return { ok: true };
+		if (url === '/api/session') return { ok: true, authenticated: false };
+		throw new Error(`unexpected URL: ${url}`);
+	};
+
+	assert.equal(
+		await loginWithSessionProbe('correct-password', request, () => {
+			events.push('native-form');
+			nativeFallbacks += 1;
+		}),
+		'native-form'
+	);
+	assert.equal(nativeFallbacks, 1);
+	assert.deepEqual(events, ['request:/api/login', 'request:/api/session', 'native-form']);
+	assert.deepEqual(calls.map(({ url }) => url), ['/api/login', '/api/session']);
+	assert.ok(calls.every(({ url }) => !url.includes('correct-password')),
+		'passwords must stay in request bodies, never URLs');
+	assert.ok(calls.every(({ url }) => !/[?&](?:password|token)=/i.test(url)),
+		'passwords and session tokens must not be placed in URL query parameters');
+	assert.equal(JSON.parse(calls[0].options.body).password, 'correct-password');
+});
+
+test('Safari keeps the JSON flow when the session probe authenticates', async () => {
+	const loginWithSessionProbe = await loadLoginWithSessionProbe();
+	let nativeFallbacks = 0;
+	const result = await loginWithSessionProbe('correct-password', async (url) => {
+		if (url === '/api/login') return { ok: true };
+		return { ok: true, authenticated: true };
+	}, () => { nativeFallbacks += 1; });
+
+	assert.equal(result, 'session');
+	assert.equal(nativeFallbacks, 0);
+});
+
+test('Safari does not invoke the native fallback when JSON login rejects', async () => {
+	const loginWithSessionProbe = await loadLoginWithSessionProbe();
+	const calls = [];
+	let nativeFallbacks = 0;
+
+	await assert.rejects(
+		() => loginWithSessionProbe('wrong-password', async (url, options) => {
+			calls.push({ url, options });
+			throw new Error('unauthorized');
+		}, () => { nativeFallbacks += 1; }),
+		/unauthorized/
+	);
+	assert.equal(nativeFallbacks, 0);
+	assert.deepEqual(calls.map(({ url }) => url), ['/api/login']);
+	assert.ok(calls.every(({ url }) => !url.includes('wrong-password')),
+		'wrong passwords must not appear in URLs either');
+	assert.ok(calls.every(({ url }) => !/[?&](?:password|token)=/i.test(url)),
+		'passwords and session tokens must not be placed in URL query parameters');
+});
 
 test('mobile login uses a native password form with a handled submit event', async () => {
 	const [html, app] = await Promise.all([
@@ -36,13 +106,14 @@ test('mobile login uses a native password form with a handled submit event', asy
 	assert.match(app, /els\.unlockForm\.addEventListener\(["']submit["']/);
 	assert.match(app, /event\.preventDefault\(\)/);
 	assert.match(app, /fetch\(url, Object\.assign\(\{ credentials: ['"]same-origin['"] \}/);
+	assert.match(app, /HTMLFormElement\.prototype\.submit\.call\(els\.loginForm\)/);
 	assert.match(app, /loginSubmitting/);
 	assert.match(app, /if \([^\n]*state\.loginSubmitting\) return/);
-	const loginRequest = app.indexOf("await api('/api/login'");
+	assert.match(app, /import \{ loginWithSessionProbe \} from ['"]\.\/login-flow\.js['"]/);
+	const loginRequest = app.indexOf('loginWithSessionProbe(');
 	assert.ok(loginRequest >= 0);
-	const sessionProbe = app.indexOf("const session = await api('/api/session')", loginRequest);
 	const localUnlock = app.indexOf('await unlockVault(password, performedLogin)', loginRequest);
-	assert.ok(sessionProbe > loginRequest && localUnlock > sessionProbe,
+	assert.ok(localUnlock > loginRequest,
 		'the browser must verify its cookie-backed session before deriving the local vault key');
 	assert.match(app, /await unlockVault\(els\.unlockPasswordInput\.value, true\)/,
 		'the authenticated native-form fallback must initialize a missing key check after verifying existing notes');

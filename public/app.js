@@ -1,5 +1,6 @@
 import { encryptSharedPayload } from './share-crypto.js';
 import { createQrSvg } from './qr.js';
+import { loginWithSessionProbe } from './login-flow.js';
 
 /**
  * @typedef {{ id: string, title: string, content: string, created_at: number, updated_at: number, revision: number }} RawNote
@@ -1181,15 +1182,14 @@ els.loginForm.addEventListener('submit', async function (event) {
     els.loginStatus.textContent = '登录中…';
     const password = els.passwordInput.value;
     if (!password) throw new Error('请输入密码');
-    await api('/api/login', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ password: password })
-    });
-    const session = await api('/api/session');
-    if (!session.authenticated) {
-      throw new Error('服务器会话未能建立，请检查浏览器是否接受登录 Cookie 后重试');
-    }
+    const loginResult = await loginWithSessionProbe(
+      password,
+      api,
+      function () {
+        HTMLFormElement.prototype.submit.call(els.loginForm);
+      }
+    );
+    if (loginResult === 'native-form') return;
     performedLogin = true;
     state.sessionAuthenticated = true;
     await unlockVault(password, performedLogin);
