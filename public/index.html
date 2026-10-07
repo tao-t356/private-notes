@@ -25,6 +25,7 @@
           </div>
           <div id="unlockBadge" class="unlock-badge hidden">✓ 已通过访问验证，只需输入密码解锁内容</div>
           <form id="loginForm" action="/api/login" method="post" autocomplete="on">
+            <input id="loginCsrfToken" type="hidden" name="login_csrf_token" value="" />
             <h1 id="loginTitle" class="login-title">正在打开我的笔记</h1>
             <p id="loginDesc" class="login-desc">正在检查当前设备的访问状态，页面会保持在原位。</p>
 

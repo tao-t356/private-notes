@@ -3,7 +3,7 @@
  *
  * @param {string} password
  * @param {LoginRequest} request
- * @param {() => void} submitNativeForm
+ * @param {(token: string) => void} submitNativeForm
  * @returns {Promise<'session' | 'native-form'>}
  */
 export async function loginWithSessionProbe(password, request, submitNativeForm) {
@@ -15,7 +15,11 @@ export async function loginWithSessionProbe(password, request, submitNativeForm)
 
   const session = await request('/api/session');
   if (!session.authenticated) {
-    submitNativeForm();
+    const formTokenResponse = await request('/api/login/form-token');
+    if (!formTokenResponse || typeof formTokenResponse.token !== 'string' || !formTokenResponse.token) {
+      throw new Error('服务器未返回有效的登录表单令牌');
+    }
+    submitNativeForm(formTokenResponse.token);
     return 'native-form';
   }
 

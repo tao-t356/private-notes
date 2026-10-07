@@ -2,7 +2,14 @@ type SchemaEnv = {
 	DB: D1Database;
 };
 
-const APPLICATION_TABLE_NAMES = ['app_meta', 'auth_rate_limits', 'd1_migrations', 'note_shares', 'notes'] as const;
+const APPLICATION_TABLE_NAMES = [
+	'app_meta',
+	'auth_rate_limits',
+	'd1_migrations',
+	'login_csrf_tokens',
+	'note_shares',
+	'notes',
+] as const;
 const APPLIED_MIGRATIONS = [
 	'0001_init.sql',
 	'0002_notes_fts.sql',
@@ -12,6 +19,7 @@ const APPLIED_MIGRATIONS = [
 	'0006_hardening.sql',
 	'0007_one_time_shares.sql',
 	'0008_reusable_shares.sql',
+	'0009_login_csrf_tokens.sql',
 ] as const;
 
 const schemaChecks = new WeakMap<object, Promise<void>>();
@@ -80,6 +88,18 @@ async function initializeFreshDatabase(db: D1Database) {
 		db.prepare(
 			`CREATE INDEX IF NOT EXISTS idx_auth_rate_limits_updated_at
 			 ON auth_rate_limits(updated_at)`
+		),
+		db.prepare(
+			`CREATE TABLE IF NOT EXISTS login_csrf_tokens (
+			 token_hash TEXT PRIMARY KEY,
+			 binding_hash TEXT NOT NULL,
+			 created_at INTEGER NOT NULL,
+			 expires_at INTEGER NOT NULL
+			)`
+		),
+		db.prepare(
+			`CREATE INDEX IF NOT EXISTS idx_login_csrf_tokens_expires_at
+			 ON login_csrf_tokens(expires_at)`
 		),
 		db.prepare(
 			`CREATE TABLE IF NOT EXISTS note_shares (

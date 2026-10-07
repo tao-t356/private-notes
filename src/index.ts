@@ -4,12 +4,14 @@ import {
 	MAX_PASSWORD_LENGTH,
 	cleanupOldLoginRateLimits,
 	clearFailedLogins,
+	consumeLoginCsrfToken,
 	createSessionToken,
 	getAuthConfigurationError,
 	getConfiguredVaultCount,
 	getLoginRateLimit,
 	getSession,
 	getVaultIdForPassword,
+	issueLoginCsrfToken,
 	recordFailedLogin,
 	resolveCookieSecret,
 	tooManyLoginAttempts,
@@ -138,8 +140,14 @@ function contentTypeIsJson(request: Request) {
 
 function requireSameOriginNativeLogin(request: Request) {
 	const expectedOrigin = new URL(request.url).origin;
-	if (request.headers.get('origin') !== expectedOrigin) {
+	if (request.headers.get('origin') && request.headers.get('origin') !== expectedOrigin) {
 		throw new ApiError(403, 'same_origin_required', 'native login form requires an exact same-origin Origin');
+	}
+}
+
+function requireLoginCsrfToken(body: Record<string, unknown>) {
+	if (typeof body.login_csrf_token !== 'string' || !body.login_csrf_token) {
+		throw new ApiError(403, 'login_csrf_required', 'native login form requires a fresh login CSRF token');
 	}
 }
 
@@ -579,9 +587,24 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 		return json({ ok: true, authenticated: session.authenticated, vaultId: session.vaultId });
 	}
 
+	if (url.pathname === '/api/login/form-token' && request.method === 'GET') {
+		const issued = await issueLoginCsrfToken(request, env);
+		return json(
+			{ ok: true, token: issued.token },
+			200,
+			issued.setCookie ? { 'set-cookie': issued.setCookie } : {}
+		);
+	}
+
 	if (url.pathname === '/api/login' && request.method === 'POST') {
 		const { body, nativeForm } = await readLoginBody(request);
-		if (nativeForm) requireSameOriginNativeLogin(request);
+		if (nativeForm) {
+			requireSameOriginNativeLogin(request);
+			requireLoginCsrfToken(body);
+			if (!(await consumeLoginCsrfToken(request, env, body.login_csrf_token))) {
+				throw new ApiError(403, 'login_csrf_required', 'native login form requires a fresh login CSRF token');
+			}
+		}
 		if (typeof body.password !== 'string' || !body.password || body.password.length > MAX_PASSWORD_LENGTH) {
 			throw new ApiError(400, 'invalid_password', 'password is required');
 		}
@@ -595,7 +618,6 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 			if (failure.locked) return tooManyLoginAttempts(failure.retryAfterSeconds);
 			return unauthorized();
 		}
-
 		await clearFailedLogins(env, rateLimit.key);
 		await cleanupOldLoginRateLimits(env);
 		const token = await createSessionToken(env, vaultId);

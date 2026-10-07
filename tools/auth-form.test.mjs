@@ -26,6 +26,7 @@ test('Safari falls back to the native form only after an unauthenticated session
 		calls.push({ url, options });
 		if (url === '/api/login') return { ok: true };
 		if (url === '/api/session') return { ok: true, authenticated: false };
+		if (url === '/api/login/form-token') return { ok: true, token: 't'.repeat(43) };
 		throw new Error(`unexpected URL: ${url}`);
 	};
 
@@ -37,13 +38,44 @@ test('Safari falls back to the native form only after an unauthenticated session
 		'native-form'
 	);
 	assert.equal(nativeFallbacks, 1);
-	assert.deepEqual(events, ['request:/api/login', 'request:/api/session', 'native-form']);
-	assert.deepEqual(calls.map(({ url }) => url), ['/api/login', '/api/session']);
+	assert.deepEqual(events, [
+		'request:/api/login',
+		'request:/api/session',
+		'request:/api/login/form-token',
+		'native-form',
+	]);
+	assert.deepEqual(calls.map(({ url }) => url), ['/api/login', '/api/session', '/api/login/form-token']);
 	assert.ok(calls.every(({ url }) => !url.includes('correct-password')),
 		'passwords must stay in request bodies, never URLs');
 	assert.ok(calls.every(({ url }) => !/[?&](?:password|token)=/i.test(url)),
 		'passwords and session tokens must not be placed in URL query parameters');
 	assert.equal(JSON.parse(calls[0].options.body).password, 'correct-password');
+});
+
+test('Safari obtains a one-time native form token before submitting without Origin', async () => {
+	const loginWithSessionProbe = await loadLoginWithSessionProbe();
+	const events = [];
+	const request = async (url) => {
+		events.push(`request:${url}`);
+		if (url === '/api/login') return { ok: true };
+		if (url === '/api/session') return { ok: true, authenticated: false };
+		if (url === '/api/login/form-token') return { ok: true, token: 't'.repeat(43) };
+		throw new Error(`unexpected URL: ${url}`);
+	};
+
+	let submittedToken = '';
+	assert.equal(
+		await loginWithSessionProbe('correct-password', request, (token) => {
+			submittedToken = token;
+		}),
+		'native-form'
+	);
+	assert.deepEqual(events, [
+		'request:/api/login',
+		'request:/api/session',
+		'request:/api/login/form-token',
+	]);
+	assert.equal(submittedToken, 't'.repeat(43));
 });
 
 test('Safari keeps the JSON flow when the session probe authenticates', async () => {
@@ -88,6 +120,7 @@ test('mobile login uses a native password form with a handled submit event', asy
 	assert.ok(form, 'the login controls must be inside a native form so iOS Safari can submit from the keyboard');
 	assert.match(form[0], /\baction=["']\/api\/login["']/i);
 	assert.match(form[0], /\bmethod=["']post["']/i);
+	assert.match(form[0], /<input\b[^>]*\bid=["']loginCsrfToken["'][^>]*\btype=["']hidden["'][^>]*\bname=["']login_csrf_token["']/i);
 	assert.match(form[0], /\bautocomplete=["']on["']/i);
 	assert.match(form[0], /<input\b[^>]*\bid=["']passwordInput["'][^>]*\bautocomplete=["']current-password["'][^>]*\bname=["']password["']/i);
 	assert.match(form[0], /<input\b[^>]*\bid=["']passwordInput["'][^>]*\brequired(?:\s|>)/i);
@@ -106,6 +139,7 @@ test('mobile login uses a native password form with a handled submit event', asy
 	assert.match(app, /els\.unlockForm\.addEventListener\(["']submit["']/);
 	assert.match(app, /event\.preventDefault\(\)/);
 	assert.match(app, /fetch\(url, Object\.assign\(\{ credentials: ['"]same-origin['"] \}/);
+	assert.match(app, /loginCsrfToken\.value = token/);
 	assert.match(app, /HTMLFormElement\.prototype\.submit\.call\(els\.loginForm\)/);
 	assert.match(app, /loginSubmitting/);
 	assert.match(app, /if \([^\n]*state\.loginSubmitting\) return/);

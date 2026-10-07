@@ -103,6 +103,7 @@ const els = {
   loginTitle: getElement('loginTitle'),
   loginDesc: getElement('loginDesc'),
   passwordInput: getInput('passwordInput'),
+  loginCsrfToken: getInput('loginCsrfToken'),
   passwordHelp: getElement('passwordHelp'),
   loginBtn: getButton('loginBtn'),
   unlockTitle: getElement('unlockTitle'),
@@ -248,6 +249,7 @@ function base64ToBytes(base64) {
 
 function clearSensitiveInputs() {
   els.passwordInput.value = '';
+  els.loginCsrfToken.value = '';
   els.unlockPasswordInput.value = '';
   els.vaultUnlockInput.value = '';
 }
@@ -1185,7 +1187,8 @@ els.loginForm.addEventListener('submit', async function (event) {
     const loginResult = await loginWithSessionProbe(
       password,
       api,
-      function () {
+      function (token) {
+        els.loginCsrfToken.value = token;
         HTMLFormElement.prototype.submit.call(els.loginForm);
       }
     );

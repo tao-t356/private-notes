@@ -54,6 +54,19 @@ async function login(password = DEFAULT_PASSWORD, ip = `203.0.113.${Math.floor(M
 	return { response, cookie: cookieFrom(response) };
 }
 
+async function loginFormToken(ip = '203.0.113.240') {
+	const response = await api('/api/login/form-token', {
+		headers: { 'cf-connecting-ip': ip },
+	});
+	expect(response.status).toBe(200);
+	const body = await jsonBody(response);
+	expect(body.ok).toBe(true);
+	expect(body.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+	const cookie = cookieFrom(response);
+	expect(cookie).toMatch(/^__Host-login-csrf=[A-Za-z0-9_-]{43}$/);
+	return { token: String(body.token), cookie };
+}
+
 async function createNote(
 	cookie: string,
 	label: string,
@@ -79,6 +92,7 @@ beforeEach(async () => {
 		env.DB.prepare('DELETE FROM note_shares'),
 		env.DB.prepare('DELETE FROM app_meta'),
 		env.DB.prepare('DELETE FROM auth_rate_limits'),
+		env.DB.prepare('DELETE FROM login_csrf_tokens'),
 	]);
 });
 
@@ -98,14 +112,16 @@ describe('private-notes worker', () => {
 	});
 
 	it('accepts the native URL-encoded login form and redirects back without weakening the session cookie', async () => {
+		const { token, cookie } = await loginFormToken('203.0.113.241');
 		const response = await worker.fetch(new Request(`${ORIGIN}/api/login`, {
 			method: 'POST',
 			headers: {
 				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
 				'cf-connecting-ip': '203.0.113.241',
 				origin: ORIGIN,
+				cookie,
 			},
-			body: new URLSearchParams({ password: DEFAULT_PASSWORD }),
+			body: new URLSearchParams({ password: DEFAULT_PASSWORD, login_csrf_token: token }),
 		}), env);
 
 		expect(response.status, `${response.status} ${response.headers.get('content-type')} ${await response.clone().text()}`).toBe(303);
@@ -122,13 +138,73 @@ describe('private-notes worker', () => {
 		await expect(session.json()).resolves.toMatchObject({ authenticated: true, vaultId: 'default' });
 	});
 
-	it('rejects native URL-encoded login without an exact same-origin Origin', async () => {
-		for (const origin of [undefined, 'https://attacker.example']) {
+	it('accepts Safari native login without Origin with a fresh one-time form token', async () => {
+		const { token, cookie } = await loginFormToken();
+
+		const response = await worker.fetch(new Request(`${ORIGIN}/api/login`, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+				'cf-connecting-ip': '203.0.113.240',
+				cookie,
+			},
+			body: new URLSearchParams({ password: DEFAULT_PASSWORD, login_csrf_token: token }),
+		}), env);
+
+		expect(response.status, `${response.status} ${response.headers.get('content-type')} ${await response.clone().text()}`).toBe(303);
+		expect(response.headers.get('location')).toBe('/');
+		expect(response.headers.get('set-cookie')).toMatch(/^__Host-session=[^;]+;/);
+	});
+
+	it('consumes Safari native login form tokens exactly once', async () => {
+		const { token, cookie } = await loginFormToken('203.0.113.244');
+		const makeRequest = () => worker.fetch(new Request(`${ORIGIN}/api/login`, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+				'cf-connecting-ip': '203.0.113.244',
+				cookie,
+			},
+			body: new URLSearchParams({ password: DEFAULT_PASSWORD, login_csrf_token: token }),
+		}), env);
+
+		const first = await makeRequest();
+		expect(first.status).toBe(303);
+		const replay = await makeRequest();
+		expect(replay.status).toBe(403);
+		expect(replay.headers.get('set-cookie')).toBeNull();
+		await expect(replay.json()).resolves.toMatchObject({ code: 'login_csrf_required' });
+	});
+
+	it('consumes the native login form token even when the password attempt fails', async () => {
+		const { token, cookie } = await loginFormToken('203.0.113.245');
+		const makeRequest = (password: string) => worker.fetch(new Request(`${ORIGIN}/api/login`, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+				'cf-connecting-ip': '203.0.113.245',
+				cookie,
+			},
+			body: new URLSearchParams({ password, login_csrf_token: token }),
+		}), env);
+
+		const wrongPassword = await makeRequest('wrong-password');
+		expect(wrongPassword.status).toBe(401);
+		const replay = await makeRequest(DEFAULT_PASSWORD);
+		expect(replay.status).toBe(403);
+		await expect(replay.json()).resolves.toMatchObject({ code: 'login_csrf_required' });
+	});
+
+	it('rejects native URL-encoded login without a valid form token or with a foreign Origin', async () => {
+		for (const testCase of [
+			{ origin: undefined, code: 'login_csrf_required', ip: '203.0.113.242' },
+			{ origin: 'https://attacker.example', code: 'same_origin_required', ip: '203.0.113.243' },
+		]) {
 			const headers = new Headers({
 				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-				'cf-connecting-ip': origin ? '203.0.113.242' : '203.0.113.243',
+				'cf-connecting-ip': testCase.ip,
 			});
-			if (origin) headers.set('origin', origin);
+			if (testCase.origin) headers.set('origin', testCase.origin);
 
 			const response = await worker.fetch(new Request(`${ORIGIN}/api/login`, {
 				method: 'POST',
@@ -138,7 +214,7 @@ describe('private-notes worker', () => {
 
 			expect(response.status).toBe(403);
 			expect(response.headers.get('set-cookie')).toBeNull();
-			await expect(response.json()).resolves.toMatchObject({ code: 'same_origin_required' });
+			await expect(response.json()).resolves.toMatchObject({ code: testCase.code });
 		}
 	});
 
@@ -348,6 +424,7 @@ describe('private-notes worker', () => {
 		await env.DB.batch([
 			env.DB.prepare('DROP TABLE IF EXISTS note_shares'),
 			env.DB.prepare('DROP TABLE IF EXISTS notes'),
+			env.DB.prepare('DROP TABLE IF EXISTS login_csrf_tokens'),
 			env.DB.prepare('DROP TABLE IF EXISTS app_meta'),
 			env.DB.prepare('DROP TABLE IF EXISTS auth_rate_limits'),
 			env.DB.prepare('DROP TABLE IF EXISTS d1_migrations'),
@@ -365,10 +442,10 @@ describe('private-notes worker', () => {
 		const tables = await env.DB.prepare(
 			`SELECT name FROM sqlite_master
 			 WHERE type = 'table'
-			   AND name IN ('app_meta', 'auth_rate_limits', 'd1_migrations', 'note_shares', 'notes')`
+			   AND name IN ('app_meta', 'auth_rate_limits', 'd1_migrations', 'login_csrf_tokens', 'note_shares', 'notes')`
 		).all<{ name: string }>();
 		expect(new Set((tables.results ?? []).map((row) => row.name))).toEqual(
-			new Set(['app_meta', 'auth_rate_limits', 'd1_migrations', 'note_shares', 'notes'])
+		new Set(['app_meta', 'auth_rate_limits', 'd1_migrations', 'login_csrf_tokens', 'note_shares', 'notes'])
 		);
 		const journal = await env.DB.prepare('SELECT name FROM d1_migrations ORDER BY id').all<{ name: string }>();
 		expect((journal.results ?? []).map((row) => row.name)).toEqual([
@@ -380,6 +457,7 @@ describe('private-notes worker', () => {
 			'0006_hardening.sql',
 			'0007_one_time_shares.sql',
 			'0008_reusable_shares.sql',
+			'0009_login_csrf_tokens.sql',
 		]);
 		const shareColumns = await env.DB.prepare('PRAGMA table_info(note_shares)').all<{ name: string }>();
 		expect((shareColumns.results ?? []).map((column) => column.name)).toContain('share_mode');
@@ -404,6 +482,7 @@ describe('private-notes worker', () => {
 		await env.DB.batch([
 			env.DB.prepare('DROP TABLE IF EXISTS note_shares'),
 			env.DB.prepare('DROP TABLE IF EXISTS notes'),
+			env.DB.prepare('DROP TABLE IF EXISTS login_csrf_tokens'),
 			env.DB.prepare('DROP TABLE IF EXISTS app_meta'),
 			env.DB.prepare('DROP TABLE IF EXISTS auth_rate_limits'),
 			env.DB.prepare('DROP TABLE IF EXISTS d1_migrations'),
