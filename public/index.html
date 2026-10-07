@@ -16,7 +16,7 @@
   <body>
     <div class="page">
       <section id="loginView" class="login-wrap">
-        <div class="card login-card">
+        <form id="loginForm" class="card login-card" action="/api/login" method="post" autocomplete="on">
           <div class="login-brand">
             <div class="login-brand-icon">✎</div>
             <div>
@@ -29,17 +29,17 @@
 
           <div class="field-stack">
             <label class="field-label" for="passwordInput">密码</label>
-            <input id="passwordInput" class="input" type="password" autocomplete="current-password" placeholder="请稍候…" disabled />
+            <input id="passwordInput" class="input" type="password" autocomplete="current-password" name="password" placeholder="请稍候…" />
             <div id="passwordHelp" class="field-help">刷新时不再切换页面，只会显示这层锁屏。</div>
           </div>
 
           <div class="login-actions">
-            <button id="loginBtn" class="btn login-submit">进入笔记</button>
+            <button id="loginBtn" class="btn login-submit" type="submit">进入笔记</button>
             <button id="loginLogoutBtn" class="btn secondary login-logout hidden" type="button">退出当前会话</button>
           </div>
           <div class="security-note">客户端加密开启后，D1 只保存密文；搜索会在本地浏览器里完成。忘记密码将无法恢复旧密文。</div>
           <div id="loginStatus" class="login-foot"></div>
-        </div>
+        </form>
       </section>
 
       <section id="appView" class="app-dimmed">

@@ -90,6 +90,7 @@ function getButton(id) {
 
 const els = {
   loginView: getElement('loginView'),
+  loginForm: getElement('loginForm'),
   appView: getElement('appView'),
   unlockBadge: getElement('unlockBadge'),
   loginTitle: getElement('loginTitle'),
@@ -174,7 +175,6 @@ function updateLoginMode() {
   const unlockOnly = state.authMode === 'unlock' || (state.sessionAuthenticated && !state.vaultUnlocked);
   els.unlockBadge.classList.toggle('hidden', !unlockOnly);
   els.loginLogoutBtn.classList.toggle('hidden', !unlockOnly);
-  els.passwordInput.disabled = checking;
   els.loginBtn.disabled = checking;
   if (checking) {
     els.loginTitle.textContent = '正在打开' + state.appShortName;
@@ -186,11 +186,11 @@ function updateLoginMode() {
   }
   els.loginTitle.textContent = unlockOnly ? '解锁' + state.appShortName : '登录到' + state.appShortName;
   els.loginDesc.textContent = unlockOnly
-    ? '你已经通过访问验证。现在输入密码解锁本地加密内容；刷新后不会再出现页面跳转。'
+    ? '站点访问会话仍然有效。刷新会清除内存中的解密密钥；请重新输入密码解锁，不会再次登录。'
     : '输入密码后即可进入应用，并在本地解锁你的加密笔记。';
   els.passwordInput.placeholder = unlockOnly ? '输入解锁密码' : '输入访问密码';
   els.passwordHelp.textContent = unlockOnly
-    ? '密码只在本次页面会话中用于派生解密密钥，不再明文保存到 localStorage。'
+    ? '密码只在当前页面内用于派生本地解密密钥；刷新后需要重新解锁，密码和密钥都不会持久化。'
     : '同一个密码同时用于访问站点和本地解密。';
   els.loginBtn.textContent = unlockOnly ? '解锁' + state.appShortName : '进入笔记';
 }
@@ -1130,7 +1130,9 @@ async function checkSession() {
   }
 }
 
-els.loginBtn.onclick = async function () {
+els.loginForm.addEventListener('submit', async function (event) {
+  event.preventDefault();
+  if (state.authMode === 'checking') return;
   try {
     const unlockOnly = state.sessionAuthenticated && !state.vaultUnlocked;
     let performedLogin = false;
@@ -1143,6 +1145,10 @@ els.loginBtn.onclick = async function () {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ password: password })
       });
+      const session = await api('/api/session');
+      if (!session.authenticated) {
+        throw new Error('服务器会话未能建立，请检查浏览器是否接受登录 Cookie 后重试');
+      }
       performedLogin = true;
     }
     state.sessionAuthenticated = true;
@@ -1165,12 +1171,6 @@ els.loginBtn.onclick = async function () {
     }
     els.loginStatus.textContent = message;
   }
-};
-
-[els.passwordInput].forEach(function (input) {
-  input.addEventListener('keydown', function (event) {
-    if (event.key === 'Enter') els.loginBtn.click();
-  });
 });
 
 els.vaultUnlockInput.addEventListener('keydown', function (event) {

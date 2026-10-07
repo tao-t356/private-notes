@@ -431,18 +431,22 @@ describe('private-notes worker', () => {
 		expect(stored?.value).toBe(damagedSecret);
 	});
 
-	it('starts unauthenticated and issues a hardened signed session cookie', async () => {
+	it('preserves the hardened __Host session cookie in the final response and accepts its round trip', async () => {
 		const anonymous = await api('/api/session');
 		await expect(anonymous.json()).resolves.toMatchObject({ ok: true, authenticated: false });
 
 		const { response, cookie } = await login();
 		const setCookie = response.headers.get('set-cookie') || '';
-		expect(setCookie).toContain('__Host-session=');
-		expect(setCookie).toContain('HttpOnly');
-		expect(setCookie).toContain('Secure');
-		expect(setCookie).toContain('SameSite=Strict');
-		expect(setCookie).toContain('Path=/');
+		expect(setCookie).toMatch(/^__Host-session=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+;/);
+		expect(setCookie).toMatch(/(?:^|;\s*)HttpOnly(?:;|$)/i);
+		expect(setCookie).toMatch(/(?:^|;\s*)Secure(?:;|$)/i);
+		expect(setCookie).toMatch(/(?:^|;\s*)SameSite=Strict(?:;|$)/i);
+		expect(setCookie).toMatch(/(?:^|;\s*)Path=\/(?:;|$)/i);
+		expect(setCookie).toMatch(/(?:^|;\s*)Max-Age=2592000(?:;|$)/i);
+		expect(setCookie).not.toMatch(/(?:^|;\s*)Domain=/i);
+		expect(response.headers.get('x-request-id')).toBeTruthy();
 
+		// Round-trip only the cookie pair extracted from the final Set-Cookie header over the HTTPS test origin.
 		const session = await api('/api/session', { headers: { cookie } });
 		await expect(session.json()).resolves.toMatchObject({
 			ok: true,
