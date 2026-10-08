@@ -1,6 +1,13 @@
 import { encryptSharedPayload } from './share-crypto.js';
 import { createQrSvg } from './qr.js';
-import { loginWithSessionProbe } from './login-flow.js';
+import { loginWithToken, isLoginSession } from './login-flow.js';
+import { createDeviceSessionStore } from './device-session.js';
+
+const deviceStore = createDeviceSessionStore();
+/** @type {import('./login-flow.js').LoginSession | null} */
+let activeSession = null;
+let storageMessage = '';
+const logoutChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('private-notes-logout') : null;
 
 /**
  * @typedef {{ id: string, title: string, content: string, created_at: number, updated_at: number, revision: number }} RawNote
@@ -103,7 +110,8 @@ const els = {
   loginTitle: getElement('loginTitle'),
   loginDesc: getElement('loginDesc'),
   passwordInput: getInput('passwordInput'),
-  loginCsrfToken: getInput('loginCsrfToken'),
+  rememberDevice: getInput('rememberDevice'),
+  deviceStatus: getElement('deviceStatus'),
   passwordHelp: getElement('passwordHelp'),
   loginBtn: getButton('loginBtn'),
   unlockTitle: getElement('unlockTitle'),
@@ -198,7 +206,7 @@ function updateLoginMode() {
     els.loginTitle.textContent = '正在打开' + state.appShortName;
     els.loginDesc.textContent = '正在检查当前设备的访问状态，页面会保持在原位。';
     els.passwordInput.placeholder = '请稍候…';
-    els.passwordHelp.textContent = '刷新时不再切换页面，只会显示这层锁屏。';
+    els.passwordHelp.textContent = '正在恢复此设备的登录和解锁状态。';
     els.loginBtn.textContent = '请稍候…';
     return;
   }
@@ -208,7 +216,7 @@ function updateLoginMode() {
   els.passwordHelp.textContent = '同一个密码同时用于访问站点和本地解密。';
   els.loginBtn.textContent = state.loginSubmitting ? '登录中…' : '进入笔记';
   els.unlockTitle.textContent = '解锁' + state.appShortName;
-  els.unlockDesc.textContent = '站点访问会话仍然有效。刷新会清除内存中的解密密钥；请重新输入密码解锁，不会再次登录。';
+  els.unlockDesc.textContent = '站点访问会话仍然有效。此设备尚未保存可用的解密密钥，请输入原笔记密码；勾选记住后无需每次解锁。';
   els.loginUnlockBtn.textContent = state.unlockSubmitting ? '解锁中…' : '解锁' + state.appShortName;
 }
 
@@ -249,7 +257,6 @@ function base64ToBytes(base64) {
 
 function clearSensitiveInputs() {
   els.passwordInput.value = '';
-  els.loginCsrfToken.value = '';
   els.unlockPasswordInput.value = '';
   els.vaultUnlockInput.value = '';
 }
@@ -579,14 +586,18 @@ function getDisplayContent(note) {
  * @returns {Promise<any>}
  */
 async function api(url, options) {
-  const res = await fetch(url, Object.assign({ credentials: 'same-origin' }, options || {}));
+  const headers = new Headers(options?.headers);
+  if (activeSession && url !== '/api/login') headers.set('authorization', 'Bearer ' + activeSession.token);
+  const res = await fetch(url, Object.assign({}, options || {}, {
+    credentials: 'same-origin', mode: 'same-origin', cache: 'no-store', headers: headers
+  }));
   const data = await res.json().catch(function () { return {}; });
   if (res.status === 401) {
-    state.sessionAuthenticated = false;
-    state.vaultUnlocked = false;
-    state.vaultKey = null;
-    showLogin();
-    throw new Error('请先登录');
+    if (url === '/api/login') throw new Error('密码不正确，请重试');
+    activeSession = null;
+    await deviceStore.clear().catch(function () {});
+    resetLocalSession();
+    throw new Error('登录已失效，请重新输入密码');
   }
   if (!res.ok) {
     if (res.status === 409 && data.error === 'revision_conflict') {
@@ -1152,23 +1163,72 @@ async function unlockVault(passphrase, allowKeyCheckInit) {
   }
 }
 
+/** @param {CryptoConfig} config */
+function cryptoConfigId(config) {
+  return JSON.stringify([config.version, config.vaultSalt, config.kdf, config.iterations, config.cipher, config.keyCheck]);
+}
+
+async function rememberCurrentDevice() {
+  storageMessage = '';
+  try {
+    if (!els.rememberDevice.checked) { await deviceStore.clear(); return; }
+    if (!activeSession) return;
+    await deviceStore.save({
+      token: activeSession.token, vaultId: activeSession.vaultId, expiresAt: activeSession.expiresAt,
+      key: state.vaultUnlocked ? state.vaultKey : null,
+      configId: state.vaultUnlocked && state.cryptoConfig ? cryptoConfigId(state.cryptoConfig) : ''
+    });
+  } catch {
+    storageMessage = '此浏览器未允许保存设备状态，本次仍可使用，关闭或刷新后需重新登录。';
+  } finally {
+    els.deviceStatus.textContent = storageMessage;
+    els.deviceStatus.classList.toggle('hidden', !storageMessage);
+  }
+}
+
 async function checkSession() {
   showChecking();
+  const saved = await deviceStore.load().catch(function () { return null; });
+  activeSession = saved;
   const data = await api('/api/session');
-  if (data.authenticated) {
-    state.sessionAuthenticated = true;
-    state.vaultUnlocked = false;
-    state.vaultKey = null;
-    state.unlockError = '';
-    await refreshMeta();
-    state.authMode = 'unlock';
-    showLogin();
-    renderList();
-  } else {
+  if (!data.authenticated) {
+    activeSession = null;
+    await deviceStore.clear().catch(function () {});
     state.sessionAuthenticated = false;
     state.vaultUnlocked = false;
     state.vaultKey = null;
+    state.cryptoConfig = null;
     state.unlockError = '';
+    showLogin();
+    renderList();
+    return;
+  }
+  if (!isLoginSession(data)) throw new Error('会话响应不完整，请更新服务端后重试');
+  activeSession = data;
+  state.sessionAuthenticated = true;
+  state.unlockError = '';
+  await refreshMeta();
+  if (saved?.key && saved.vaultId === data.vaultId) {
+    const config = await getCryptoConfig();
+    if (config.keyCheck && saved.configId === cryptoConfigId(config)) {
+      state.vaultKey = saved.key;
+      try {
+        await verifyKeyCheck(config);
+        state.vaultUnlocked = true;
+      } catch {
+        state.vaultKey = null;
+        state.unlockError = '保存的解密密钥已失效，请重新解锁';
+      }
+    }
+  }
+  // Renew the remembered token, without discarding a good key on a network error.
+  if (saved) await rememberCurrentDevice();
+  if (state.vaultUnlocked) {
+    await refreshNotes();
+    showApp();
+    if (storageMessage) els.loginStatus.textContent = storageMessage;
+  } else {
+    state.authMode = 'unlock';
     showLogin();
     renderList();
   }
@@ -1180,22 +1240,14 @@ els.loginForm.addEventListener('submit', async function (event) {
   state.loginSubmitting = true;
   updateLoginMode();
   try {
-    let performedLogin = false;
     els.loginStatus.textContent = '登录中…';
     const password = els.passwordInput.value;
     if (!password) throw new Error('请输入密码');
-    const loginResult = await loginWithSessionProbe(
-      password,
-      api,
-      function (token) {
-        els.loginCsrfToken.value = token;
-        HTMLFormElement.prototype.submit.call(els.loginForm);
-      }
-    );
-    if (loginResult === 'native-form') return;
-    performedLogin = true;
+    activeSession = await loginWithToken(password, api);
     state.sessionAuthenticated = true;
-    await unlockVault(password, performedLogin);
+    state.cryptoConfig = null;
+    await unlockVault(password, true);
+    await rememberCurrentDevice();
     clearSensitiveInputs();
     showApp();
     setStatus('已登录并解锁');
@@ -1207,7 +1259,8 @@ els.loginForm.addEventListener('submit', async function (event) {
     const message = error instanceof Error ? error.message : '登录失败';
     if (state.sessionAuthenticated) {
       state.unlockError = message;
-      await refreshMeta();
+      await rememberCurrentDevice();
+      await refreshMeta().catch(function () {});
       showLogin();
     } else {
       showLogin();
@@ -1227,6 +1280,7 @@ els.unlockForm.addEventListener('submit', async function (event) {
   try {
     els.loginStatus.textContent = '解锁中…';
     await unlockVault(els.unlockPasswordInput.value, true);
+    await rememberCurrentDevice();
     clearSensitiveInputs();
     showApp();
     setStatus('已解锁');
@@ -1236,7 +1290,7 @@ els.unlockForm.addEventListener('submit', async function (event) {
     state.vaultKey = null;
     const message = error instanceof Error ? error.message : '解锁失败';
     state.unlockError = message;
-    await refreshMeta();
+    await refreshMeta().catch(function () {});
     showLogin();
     els.loginStatus.textContent = message;
   } finally {
@@ -1297,7 +1351,20 @@ els.fabTopBtn.onclick = function () {
 };
 
 async function logout() {
-  await api('/api/logout', { method: 'POST' });
+  // Start cookie cleanup with the current token, but always clear this device,
+  // even offline. A failed logout request must not leave a remembered AES key.
+  const request = api('/api/logout', { method: 'POST' }).catch(function () {});
+  activeSession = null;
+  logoutChannel?.postMessage('logout');
+  resetLocalSession();
+  try { await deviceStore.clear(); }
+  catch { els.loginStatus.textContent = '未能清除设备记录，请清除此站点的浏览器数据。'; }
+  await request;
+}
+
+function resetLocalSession() {
+  activeSession = null;
+  els.deviceStatus.classList.add('hidden');
   closeComposer();
   closeShareDialog(true);
   state.notes = [];
@@ -1316,6 +1383,10 @@ async function logout() {
   renderList();
   setStatus('');
 }
+
+if (logoutChannel) logoutChannel.onmessage = function (event) {
+  if (event.data === 'logout') resetLocalSession();
+};
 
 els.logoutBtn.onclick = function () {
   logout().catch(function (error) {

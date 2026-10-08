@@ -42,3 +42,6 @@
 
 /app-icon.svg
   Cache-Control: public, max-age=604800
+
+/device-session.js
+  Cache-Control: public, max-age=0, must-revalidate

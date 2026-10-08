@@ -35,6 +35,8 @@ export type SessionData = {
 	authenticated: boolean;
 	vaultId: string;
 	setCookie?: string;
+	token?: string;
+	expiresAt?: number;
 };
 
 export function createSessionCookie(token: string) {
@@ -296,7 +298,12 @@ export async function getSession(request: Request, env: AuthEnv): Promise<Sessio
 		return { authenticated: false, vaultId: DEFAULT_VAULT_ID };
 	}
 
-	const session = getCookie(request, SESSION_COOKIE_NAME);
+	// An explicit token must never silently fall back to a different cookie vault.
+	const authorization = request.headers.get('authorization');
+	const session =
+		authorization !== null
+			? (/^Bearer ([A-Za-z0-9_.-]+)$/i.exec(authorization)?.[1] || '')
+			: getCookie(request, SESSION_COOKIE_NAME);
 	if (!session) return { authenticated: false, vaultId: DEFAULT_VAULT_ID };
 	const vaultId = await verifySessionToken(env, session);
 	if (!vaultId) return { authenticated: false, vaultId: DEFAULT_VAULT_ID };
@@ -304,7 +311,13 @@ export async function getSession(request: Request, env: AuthEnv): Promise<Sessio
 	return {
 		authenticated: true,
 		vaultId,
-		...(refreshedToken ? { setCookie: createSessionCookie(refreshedToken) } : {}),
+		...(refreshedToken
+			? {
+					setCookie: createSessionCookie(refreshedToken),
+					token: refreshedToken,
+					expiresAt: (Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SECONDS) * 1000,
+				}
+			: {}),
 	};
 }
 

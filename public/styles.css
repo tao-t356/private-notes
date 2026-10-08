@@ -756,3 +756,8 @@ button, input, textarea { font: inherit; }
   opacity: 0 !important;
   pointer-events: none !important;
 }
+
+.remember-device { display: flex; align-items: center; gap: 8px; margin: 16px 0 6px; cursor: pointer; }
+.remember-device input { width: 17px; height: 17px; accent-color: var(--accent, #316be8); }
+
+.device-status { padding: 12px 16px; margin-bottom: 12px; font-size: 14px; }

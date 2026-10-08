@@ -1,4 +1,5 @@
 import {
+	SESSION_MAX_AGE_SECONDS,
 	SESSION_COOKIE_NAME,
 	MAX_PASSWORD_LENGTH,
 	cleanupOldLoginRateLimits,
@@ -622,7 +623,13 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 	if (url.pathname === '/api/session' && request.method === 'GET') {
 		const session = await getSession(request, env);
 		return json(
-			{ ok: true, authenticated: session.authenticated, vaultId: session.vaultId },
+			{
+				ok: true,
+				authenticated: session.authenticated,
+				vaultId: session.vaultId,
+				token: session.token,
+				expiresAt: session.expiresAt,
+			},
 			200,
 			session.setCookie ? { 'set-cookie': session.setCookie } : {}
 		);
@@ -676,7 +683,11 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 				},
 			});
 		}
-		return json({ ok: true, vaultId }, 200, { 'set-cookie': sessionCookie });
+		return json(
+			{ ok: true, vaultId, token, expiresAt: (Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SECONDS) * 1000 },
+			200,
+			{ 'set-cookie': sessionCookie }
+		);
 	}
 
 	if (url.pathname === '/api/logout' && request.method === 'POST') {

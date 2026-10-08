@@ -25,14 +25,13 @@
           </div>
           <div id="unlockBadge" class="unlock-badge hidden">✓ 已通过访问验证，只需输入密码解锁内容</div>
           <form id="loginForm" action="/api/login" method="post" autocomplete="on">
-            <input id="loginCsrfToken" type="hidden" name="login_csrf_token" value="" />
             <h1 id="loginTitle" class="login-title">正在打开我的笔记</h1>
             <p id="loginDesc" class="login-desc">正在检查当前设备的访问状态，页面会保持在原位。</p>
 
             <div class="field-stack">
               <label class="field-label" for="passwordInput">密码</label>
               <input id="passwordInput" class="input" type="password" autocomplete="current-password" name="password" placeholder="请稍候…" required />
-              <div id="passwordHelp" class="field-help">刷新时不再切换页面，只会显示这层锁屏。</div>
+              <div id="passwordHelp" class="field-help">正在恢复此设备的登录和解锁状态。</div>
             </div>
 
             <div class="login-actions">
@@ -47,7 +46,7 @@
             <div class="field-stack">
               <label class="field-label" for="unlockPasswordInput">解锁密码</label>
               <input id="unlockPasswordInput" class="input" type="password" autocomplete="off" placeholder="输入解锁密码" required />
-              <div class="field-help">只在当前页面内用于派生本地解密密钥；密码和密钥都不会持久化。</div>
+              <div class="field-help">无需再次登录；若修改过访问密码，这里仍使用原笔记密码。</div>
             </div>
 
             <div class="login-actions">
@@ -56,10 +55,14 @@
             </div>
           </form>
 
+          <label class="remember-device"><input id="rememberDevice" type="checkbox" checked /> 记住此设备，下次直接打开笔记</label>
+          <div class="field-help">仅用于自己的设备；保存登录凭证和解密密钥，不保存明文密码。退出后清除。</div>
           <div class="security-note">客户端加密开启后，D1 只保存密文；搜索会在本地浏览器里完成。忘记密码将无法恢复旧密文。</div>
           <div id="loginStatus" class="login-foot"></div>
         </div>
       </section>
+
+      <div id="deviceStatus" class="card device-status hidden" role="status"></div>
 
       <section id="appView" class="app-dimmed">
         <header id="topbar" class="card topbar hidden-when-modal">

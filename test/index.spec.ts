@@ -1148,3 +1148,53 @@ describe('private-notes worker', () => {
 		20_000
 	);
 });
+
+
+describe('cookie-independent device sessions', () => {
+  it('authenticates and renews a bearer token without any cookie (Safari)', async () => {
+    const { response } = await login();
+    const issued = await jsonBody(response);
+    expect(issued.token).toBeTruthy();
+    expect(Number(issued.expiresAt)).toBeGreaterThan(Date.now() + 364 * 86400000);
+    const headers = { authorization: 'Bearer ' + issued.token };
+    const restored = await api('/api/session', { headers });
+    const renewed = await jsonBody(restored);
+    expect(renewed).toMatchObject({ authenticated: true, vaultId: 'default' });
+    expect(renewed.token).toBeTruthy();
+    expect(Number(renewed.expiresAt)).toBeGreaterThanOrEqual(Number(issued.expiresAt));
+    expect(restored.headers.get('cache-control')).toBe('no-store');
+    const notes = await api('/api/notes', { headers });
+    expect(notes.status).toBe(200);
+    expect((await jsonBody(notes)).notes).toEqual([]);
+  });
+
+  it('an explicit invalid token cannot fall back to a valid cookie', async () => {
+    const { cookie } = await login();
+    for (const authorization of ['Bearer tampered.token', 'Basic invalid', 'Bearer']) {
+      const response = await api('/api/session', { headers: { cookie, authorization } });
+      expect(await jsonBody(response), JSON.stringify(authorization)).toMatchObject({ authenticated: false });
+      expect(response.headers.get('set-cookie')).toBeNull();
+      expect((await api('/api/notes', { headers: { cookie, authorization } })).status).toBe(401);
+    }
+  });
+
+  it('password changes invalidate remembered tokens', async () => {
+    const { response } = await login();
+    const issued = await jsonBody(response);
+    const restored = await worker.fetch(new Request(ORIGIN + '/api/session', {
+      headers: { authorization: 'Bearer ' + issued.token },
+    }), { ...env, APP_PASSWORD: 'changed-password-with-strong-entropy' });
+    expect(await jsonBody(restored)).toMatchObject({ authenticated: false });
+  });
+
+  it('bearer vault identity takes precedence over another vault cookie', async () => {
+    const owner = await login();
+    const guest = await login(GUEST_PASSWORD);
+    const issued = await jsonBody(guest.response);
+    await createNote(owner.cookie, 'owner-only');
+    const headers = { cookie: owner.cookie, authorization: 'Bearer ' + issued.token };
+    const response = await api('/api/session', { headers });
+    expect(await jsonBody(response)).toMatchObject({ authenticated: true, vaultId: 'guest' });
+    expect((await jsonBody(await api('/api/notes', { headers }))).notes).toEqual([]);
+  });
+});
