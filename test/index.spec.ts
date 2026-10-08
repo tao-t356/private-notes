@@ -54,19 +54,6 @@ async function login(password = DEFAULT_PASSWORD, ip = `203.0.113.${Math.floor(M
 	return { response, cookie: cookieFrom(response) };
 }
 
-async function loginFormToken(ip = '203.0.113.240') {
-	const response = await api('/api/login/form-token', {
-		headers: { 'cf-connecting-ip': ip },
-	});
-	expect(response.status).toBe(200);
-	const body = await jsonBody(response);
-	expect(body.ok).toBe(true);
-	expect(body.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
-	const cookie = cookieFrom(response);
-	expect(cookie).toMatch(/^__Host-login-csrf=[A-Za-z0-9_-]{43}$/);
-	return { token: String(body.token), cookie };
-}
-
 async function createNote(
 	cookie: string,
 	label: string,
@@ -111,130 +98,21 @@ describe('private-notes worker', () => {
 		expect(await sharePage.text()).toContain('查看分享内容');
 	});
 
-	it('accepts the native URL-encoded login form and redirects back without weakening the session cookie', async () => {
-		const { token, cookie } = await loginFormToken('203.0.113.241');
-		const response = await worker.fetch(new Request(`${ORIGIN}/api/login`, {
-			method: 'POST',
-			headers: {
-				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-				'cf-connecting-ip': '203.0.113.241',
-				origin: ORIGIN,
-				cookie,
-			},
-			body: new URLSearchParams({ password: DEFAULT_PASSWORD, login_csrf_token: token }),
-		}), env);
-
-		expect(response.status, `${response.status} ${response.headers.get('content-type')} ${await response.clone().text()}`).toBe(303);
-		expect(response.headers.get('location')).toBe('/');
-		const setCookie = response.headers.get('set-cookie') || '';
-		expect(setCookie).toMatch(/^__Host-session=[^;]+;/);
-		expect(setCookie).toContain('HttpOnly');
-		expect(setCookie).toContain('Secure');
-		expect(setCookie).toContain('SameSite=Strict');
-		expect(setCookie).toContain('Path=/');
-
-		const session = await api('/api/session', { headers: { cookie: cookieFrom(response) } });
-		expect(session.status).toBe(200);
-		await expect(session.json()).resolves.toMatchObject({ authenticated: true, vaultId: 'default' });
-	});
-
-	it('accepts Safari native login without Origin with a fresh one-time form token', async () => {
-		const { token, cookie } = await loginFormToken();
-
-		const response = await worker.fetch(new Request(`${ORIGIN}/api/login`, {
-			method: 'POST',
-			headers: {
-				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-				'cf-connecting-ip': '203.0.113.240',
-				cookie,
-			},
-			body: new URLSearchParams({ password: DEFAULT_PASSWORD, login_csrf_token: token }),
-		}), env);
-
-		expect(response.status, `${response.status} ${response.headers.get('content-type')} ${await response.clone().text()}`).toBe(303);
-		expect(response.headers.get('location')).toBe('/');
-		expect(response.headers.get('set-cookie')).toMatch(/^__Host-session=[^;]+;/);
-	});
-
-	it('accepts Safari native login with an opaque Origin and a fresh one-time form token', async () => {
-		const { token, cookie } = await loginFormToken('203.0.113.246');
-
-		const response = await worker.fetch(new Request(`${ORIGIN}/api/login`, {
-			method: 'POST',
-			headers: {
-				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-				'cf-connecting-ip': '203.0.113.246',
-				origin: 'null',
-				cookie,
-			},
-			body: new URLSearchParams({ password: DEFAULT_PASSWORD, login_csrf_token: token }),
-		}), env);
-
-		expect(response.status, `${response.status} ${response.headers.get('content-type')} ${await response.clone().text()}`).toBe(303);
-		expect(response.headers.get('location')).toBe('/');
-		expect(response.headers.get('set-cookie')).toMatch(/^__Host-session=[^;]+;/);
-	});
-
-	it('consumes Safari native login form tokens exactly once', async () => {
-		const { token, cookie } = await loginFormToken('203.0.113.244');
-		const makeRequest = () => worker.fetch(new Request(`${ORIGIN}/api/login`, {
-			method: 'POST',
-			headers: {
-				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-				'cf-connecting-ip': '203.0.113.244',
-				cookie,
-			},
-			body: new URLSearchParams({ password: DEFAULT_PASSWORD, login_csrf_token: token }),
-		}), env);
-
-		const first = await makeRequest();
-		expect(first.status).toBe(303);
-		const replay = await makeRequest();
-		expect(replay.status).toBe(403);
-		expect(replay.headers.get('set-cookie')).toBeNull();
-		await expect(replay.json()).resolves.toMatchObject({ code: 'login_csrf_required' });
-	});
-
-	it('consumes the native login form token even when the password attempt fails', async () => {
-		const { token, cookie } = await loginFormToken('203.0.113.245');
-		const makeRequest = (password: string) => worker.fetch(new Request(`${ORIGIN}/api/login`, {
-			method: 'POST',
-			headers: {
-				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-				'cf-connecting-ip': '203.0.113.245',
-				cookie,
-			},
-			body: new URLSearchParams({ password, login_csrf_token: token }),
-		}), env);
-
-		const wrongPassword = await makeRequest('wrong-password');
-		expect(wrongPassword.status).toBe(401);
-		const replay = await makeRequest(DEFAULT_PASSWORD);
-		expect(replay.status).toBe(403);
-		await expect(replay.json()).resolves.toMatchObject({ code: 'login_csrf_required' });
-	});
-
-	it('rejects native URL-encoded login without a valid form token or with a foreign Origin', async () => {
-		for (const testCase of [
-			{ origin: undefined, code: 'login_csrf_required', ip: '203.0.113.242' },
-			{ origin: 'https://attacker.example', code: 'same_origin_required', ip: '203.0.113.243' },
-		]) {
-			const headers = new Headers({
-				'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-				'cf-connecting-ip': testCase.ip,
+	it('sends stale native login pages back home without creating a session or requiring Origin', async () => {
+		for (const origin of [undefined, 'null', ORIGIN, 'https://other.example']) {
+			const headers = new Headers({ 'content-type': 'application/x-www-form-urlencoded' });
+			if (origin) headers.set('origin', origin);
+			const response = await api('/api/login', {
+				method: 'POST', headers, body: new URLSearchParams({ password: DEFAULT_PASSWORD }), redirect: 'manual',
 			});
-			if (testCase.origin) headers.set('origin', testCase.origin);
-
-			const response = await worker.fetch(new Request(`${ORIGIN}/api/login`, {
-				method: 'POST',
-				headers,
-				body: new URLSearchParams({ password: DEFAULT_PASSWORD }),
-			}), env);
-
-			expect(response.status).toBe(403);
+			expect(response.status).toBe(303);
+			expect(response.headers.get('location')).toBe('/');
 			expect(response.headers.get('set-cookie')).toBeNull();
-			await expect(response.json()).resolves.toMatchObject({ code: testCase.code });
+			expect(await response.text()).toBe('');
 		}
+		const oldErrorPage = await api('/api/login', { redirect: 'manual' });
+		expect(oldErrorPage.status).toBe(303);
+		expect(oldErrorPage.headers.get('location')).toBe('/');
 	});
 
 	it('applies public branding variables to app pages and the PWA manifest', async () => {
@@ -1197,4 +1075,13 @@ describe('cookie-independent device sessions', () => {
     expect(await jsonBody(response)).toMatchObject({ authenticated: true, vaultId: 'guest' });
     expect((await jsonBody(await api('/api/notes', { headers }))).notes).toEqual([]);
   });
+});
+
+
+it('accepts a simple numeric password without additional composition rules', async () => {
+  const response = await worker.fetch(new Request(ORIGIN + '/api/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: '123456' }),
+  }), { ...env, APP_PASSWORD: '123456' });
+  expect(response.status).toBe(200);
+  expect(await jsonBody(response)).toMatchObject({ ok: true, vaultId: 'default' });
 });

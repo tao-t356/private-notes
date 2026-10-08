@@ -61,7 +61,7 @@ export function rewriteBrandedHtml(response: Response, branding: AppBranding, pa
 			.on('title', replaceText(branding.name))
 			.on('meta[name="apple-mobile-web-app-title"]', replaceAttribute('content', branding.shortName))
 			.on('meta[name="description"]', replaceAttribute('content', branding.description))
-			.on('#loginTitle', replaceText(`正在打开${branding.shortName}`))
+			.on('#loginTitle', replaceText(`登录到${branding.shortName}`))
 			.on('#topbarTitle', replaceText(branding.shortName));
 	} else {
 		rewriter = rewriter

@@ -8,8 +8,13 @@
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
 
+/
+  ! Cache-Control
+  Cache-Control: no-store
+
 /index.html
-  Cache-Control: no-cache
+  ! Cache-Control
+  Cache-Control: no-store
 
 /share.html
   ! Cache-Control
@@ -45,3 +50,7 @@
 
 /device-session.js
   Cache-Control: public, max-age=0, must-revalidate
+
+/app.bundle.js
+  ! Cache-Control
+  Cache-Control: no-store

@@ -189,7 +189,9 @@ function makeMatrix(version) {
   };
 
   const finderPositions = [[0, 0], [size - 7, 0], [0, size - 7]];
-  for (const [row, column] of finderPositions) {
+  for (const position of finderPositions) {
+    const row = position[0];
+    const column = position[1];
     for (let rowOffset = -1; rowOffset <= 7; rowOffset += 1) {
       if (row + rowOffset < 0 || row + rowOffset >= size) continue;
       for (let columnOffset = -1; columnOffset <= 7; columnOffset += 1) {

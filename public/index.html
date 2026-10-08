@@ -23,42 +23,27 @@
               <div class="login-mini">Private Notes</div>
             </div>
           </div>
-          <div id="unlockBadge" class="unlock-badge hidden">✓ 已通过访问验证，只需输入密码解锁内容</div>
           <form id="loginForm" action="/api/login" method="post" autocomplete="on">
-            <h1 id="loginTitle" class="login-title">正在打开我的笔记</h1>
-            <p id="loginDesc" class="login-desc">正在检查当前设备的访问状态，页面会保持在原位。</p>
+            <h1 id="loginTitle" class="login-title">登录到我的笔记</h1>
+            <p id="loginDesc" class="login-desc">输入密码即可进入，记住后下次直接打开。</p>
 
             <div class="field-stack">
               <label class="field-label" for="passwordInput">密码</label>
-              <input id="passwordInput" class="input" type="password" autocomplete="current-password" name="password" placeholder="请稍候…" required />
-              <div id="passwordHelp" class="field-help">正在恢复此设备的登录和解锁状态。</div>
+              <input id="passwordInput" class="input" type="password" autocomplete="current-password" name="password" placeholder="输入密码" autocapitalize="none" autocorrect="off" spellcheck="false" required />
+              <div id="passwordHelp" class="field-help">使用你设置的密码，不要求大小写或特殊符号。</div>
             </div>
 
             <div class="login-actions">
-              <button id="loginBtn" class="btn login-submit" type="submit">进入笔记</button>
+              <button id="loginBtn" class="btn login-submit" type="submit" disabled>进入笔记</button>
             </div>
           </form>
 
-          <form id="unlockForm" class="hidden" action="#" method="post" autocomplete="off">
-            <h1 id="unlockTitle" class="login-title">解锁我的笔记</h1>
-            <p id="unlockDesc" class="login-desc">站点访问会话仍然有效。请输入密码解锁本地加密内容。</p>
-
-            <div class="field-stack">
-              <label class="field-label" for="unlockPasswordInput">解锁密码</label>
-              <input id="unlockPasswordInput" class="input" type="password" autocomplete="off" placeholder="输入解锁密码" required />
-              <div class="field-help">无需再次登录；若修改过访问密码，这里仍使用原笔记密码。</div>
-            </div>
-
-            <div class="login-actions">
-              <button id="loginUnlockBtn" class="btn login-submit" type="submit">解锁我的笔记</button>
-              <button id="loginLogoutBtn" class="btn secondary login-logout hidden" type="button">退出当前会话</button>
-            </div>
-          </form>
-
+          <button id="loginLogoutBtn" class="btn secondary hidden" type="button">重新登录</button>
           <label class="remember-device"><input id="rememberDevice" type="checkbox" checked /> 记住此设备，下次直接打开笔记</label>
           <div class="field-help">仅用于自己的设备；保存登录凭证和解密密钥，不保存明文密码。退出后清除。</div>
           <div class="security-note">客户端加密开启后，D1 只保存密文；搜索会在本地浏览器里完成。忘记密码将无法恢复旧密文。</div>
-          <div id="loginStatus" class="login-foot"></div>
+          <div id="loginStatus" class="login-foot" role="status">正在加载登录组件；若长时间不变，请重新打开首页。</div>
+          <noscript>请在 Safari 设置中启用 JavaScript 后重新打开本页。</noscript>
         </div>
       </section>
 
@@ -83,17 +68,7 @@
 
         <div id="statusLine" class="status-line"></div>
 
-        <section id="vaultPanel" class="vault-panel hidden">
-          <h2 class="vault-panel-title">内容已加密</h2>
-          <p id="vaultPanelDesc" class="vault-panel-desc">请输入密码查看笔记内容。忘记密码将无法在页面内恢复旧密文。</p>
-          <div class="field-stack">
-            <label class="field-label" for="vaultUnlockInput">密码</label>
-            <input id="vaultUnlockInput" class="input" type="password" autocomplete="off" placeholder="输入密码" />
-          </div>
-          <div class="vault-panel-actions">
-            <button id="unlockBtn" class="btn">解锁内容</button>
-          </div>
-        </section>
+        <section id="vaultPanel" class="hidden"><p id="vaultPanelDesc"></p></section>
 
         <main class="layout">
           <section class="card feed">
@@ -170,6 +145,6 @@
     <button id="fabNewBtn" class="btn fab-new hidden-when-modal" type="button" aria-label="新建笔记">＋</button>
     <button id="fabTopBtn" class="fab-top hidden-when-modal" type="button" aria-label="回到顶部">↑</button>
 
-    <script type="module" src="/app.js"></script>
+    <script defer src="/app.bundle.js?v=20261008-simple"></script>
   </body>
 </html>

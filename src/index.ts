@@ -4,7 +4,6 @@ import {
 	MAX_PASSWORD_LENGTH,
 	cleanupOldLoginRateLimits,
 	clearFailedLogins,
-	consumeLoginCsrfToken,
 	createSessionCookie,
 	createSessionToken,
 	getAuthConfigurationError,
@@ -12,7 +11,6 @@ import {
 	getLoginRateLimit,
 	getSession,
 	getVaultIdForPassword,
-	issueLoginCsrfToken,
 	recordFailedLogin,
 	resolveCookieSecret,
 	tooManyLoginAttempts,
@@ -175,20 +173,6 @@ function contentTypeIsJson(request: Request) {
 	return request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() === 'application/json';
 }
 
-function requireSameOriginNativeLogin(request: Request) {
-	const expectedOrigin = new URL(request.url).origin;
-	const origin = request.headers.get('origin');
-	if (origin && origin !== 'null' && origin !== expectedOrigin) {
-		throw new ApiError(403, 'same_origin_required', 'native login form requires an exact same-origin Origin');
-	}
-}
-
-function requireLoginCsrfToken(body: Record<string, unknown>) {
-	if (typeof body.login_csrf_token !== 'string' || !body.login_csrf_token) {
-		throw new ApiError(403, 'login_csrf_required', 'native login form requires a fresh login CSRF token');
-	}
-}
-
 async function readBodyText(request: Request, maxBytes: number) {
 	const declaredLength = request.headers.get('content-length');
 	if (declaredLength && (/^\d+$/.test(declaredLength) === false || Number(declaredLength) > maxBytes)) {
@@ -233,18 +217,6 @@ async function readJsonObject(request: Request, maxBytes: number) {
 		throw new ApiError(400, 'invalid_json', 'JSON object required');
 	}
 	return parsed as Record<string, unknown>;
-}
-
-async function readLoginBody(request: Request) {
-	const contentType = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
-	if (contentType === 'application/json') {
-		return { body: await readJsonObject(request, MAX_LOGIN_BODY_BYTES), nativeForm: false };
-	}
-	if (contentType === 'application/x-www-form-urlencoded') {
-		const text = await readBodyText(request, MAX_LOGIN_BODY_BYTES);
-		return { body: Object.fromEntries(new URLSearchParams(text)), nativeForm: true };
-	}
-	throw new ApiError(415, 'unsupported_media_type', 'login must use JSON or form encoding');
 }
 
 function requireCiphertextEnvelope(
@@ -589,6 +561,12 @@ async function initializeVaultKeyCheck(env: AppEnv, vaultId: string, candidate: 
 
 async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 	const url = new URL(request.url);
+	// Old Safari tabs may still submit the removed native form. Never authenticate
+	// these requests: send them back to the current page instead of a JSON error.
+	if (url.pathname === '/api/login' && (request.method === 'GET' ||
+		(request.method === 'POST' && request.headers.get('content-type')?.startsWith('application/x-www-form-urlencoded')))) {
+		return new Response(null, { status: 303, headers: { location: '/', 'cache-control': 'no-store' } });
+	}
 	const branding = getAppBranding(env);
 	const brandedPage = BRANDED_HTML_PATHS.get(url.pathname);
 	if (brandedPage) {
@@ -635,24 +613,8 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 		);
 	}
 
-	if (url.pathname === '/api/login/form-token' && request.method === 'GET') {
-		const issued = await issueLoginCsrfToken(request, env);
-		return json(
-			{ ok: true, token: issued.token },
-			200,
-			issued.setCookie ? { 'set-cookie': issued.setCookie } : {}
-		);
-	}
-
 	if (url.pathname === '/api/login' && request.method === 'POST') {
-		const { body, nativeForm } = await readLoginBody(request);
-		if (nativeForm) {
-			requireSameOriginNativeLogin(request);
-			requireLoginCsrfToken(body);
-			if (!(await consumeLoginCsrfToken(request, env, body.login_csrf_token))) {
-				throw new ApiError(403, 'login_csrf_required', 'native login form requires a fresh login CSRF token');
-			}
-		}
+		const body = await readJsonObject(request, MAX_LOGIN_BODY_BYTES);
 		if (typeof body.password !== 'string' || !body.password || body.password.length > MAX_PASSWORD_LENGTH) {
 			throw new ApiError(400, 'invalid_password', 'password is required');
 		}
@@ -672,17 +634,6 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 		if (!token) throw new Error('failed to create session token');
 
 		const sessionCookie = createSessionCookie(token);
-		if (nativeForm) {
-			return new Response(null, {
-				status: 303,
-				headers: {
-					'cache-control': 'no-store',
-					'location': '/',
-					'set-cookie': sessionCookie,
-					'x-content-type-options': 'nosniff',
-				},
-			});
-		}
 		return json(
 			{ ok: true, vaultId, token, expiresAt: (Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SECONDS) * 1000 },
 			200,

@@ -6,8 +6,8 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "build": "npm run typecheck",
-    "check": "npm run typecheck && npm run typecheck:test && npm run typecheck:client && npm run test:tools && npm run test:ci",
+    "build": "npm run build:client && npm run typecheck",
+    "check": "npm run build:client && npm run typecheck && npm run typecheck:test && npm run typecheck:client && npm run test:tools && npm run test:ci",
     "predeploy": "npm run check",
     "deploy": "wrangler deploy && npm run db:migrations:apply",
     "deploy:dry-run": "wrangler deploy --dry-run",
@@ -21,12 +21,15 @@
     "typecheck:client": "tsc --noEmit -p tsconfig.client.json",
     "typecheck:test": "tsc --noEmit -p test/tsconfig.json",
     "cf-typegen": "wrangler types",
-    "db:migrations:apply": "wrangler d1 migrations apply DB --remote"
+    "db:migrations:apply": "wrangler d1 migrations apply DB --remote",
+    "build:client": "node tools/build-client.mjs",
+    "predev": "npm run build:client",
+    "prestart": "npm run build:client"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.18.5",
     "@types/node": "^22.0.0",
-    "fake-indexeddb": "^6.2.5",
+    "esbuild": "0.28.1",
     "jsonc-parser": "3.3.1",
     "typescript": "~5.9.3",
     "vitest": "4.1.10",

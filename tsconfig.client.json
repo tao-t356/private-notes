@@ -1,7 +1,11 @@
 {
 	"compilerOptions": {
 		"target": "ES2024",
-		"lib": ["ES2024", "DOM", "DOM.Iterable"],
+		"lib": [
+			"ES2024",
+			"DOM",
+			"DOM.Iterable"
+		],
 		"module": "ES2022",
 		"moduleResolution": "Bundler",
 		"allowJs": true,
@@ -10,5 +14,10 @@
 		"strict": true,
 		"skipLibCheck": true
 	},
-	"include": ["public/**/*.js"]
+	"include": [
+		"public/**/*.js"
+	],
+	"exclude": [
+		"public/app.bundle.js"
+	]
 }

@@ -8,8 +8,6 @@ type AuthEnv = {
 export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 365;
 export const SESSION_COOKIE_NAME = '__Host-session';
 export const MAX_PASSWORD_LENGTH = 1024;
-export const LOGIN_CSRF_COOKIE_NAME = '__Host-login-csrf';
-export const LOGIN_CSRF_MAX_AGE_SECONDS = 5 * 60;
 
 const LOGIN_MAX_FAILED_ATTEMPTS = 5;
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
@@ -19,7 +17,6 @@ const MAX_SESSION_TOKEN_LENGTH = 4096;
 const MIN_COOKIE_SECRET_LENGTH = 32;
 const MANAGED_SIGNING_SECRET_META_KEY = 'managed_signing_secret:v1';
 const MANAGED_SIGNING_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-const LOGIN_CSRF_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const UNSAFE_NEW_APP_PASSWORDS = new Set(['replace-with-a-long-unique-passphrase']);
 const UNSAFE_COOKIE_SECRETS = new Set([
 	'change-this-to-a-long-random-string',
@@ -396,61 +393,6 @@ export async function recordFailedLogin(env: AuthEnv, key: string) {
 
 export async function clearFailedLogins(env: AuthEnv, key: string) {
 	await env.DB.prepare('DELETE FROM auth_rate_limits WHERE key = ?').bind(key).run();
-}
-
-async function hashLoginCsrfValue(env: AuthEnv, value: string) {
-	return hmacSha256Base64Url(env.COOKIE_SECRET!, `login-csrf-v1\u0000${value}`);
-}
-
-export async function issueLoginCsrfToken(request: Request, env: AuthEnv) {
-	const now = Date.now();
-	await env.DB.prepare('DELETE FROM login_csrf_tokens WHERE expires_at <= ?').bind(now).run();
-
-	const existingBinding = getCookie(request, LOGIN_CSRF_COOKIE_NAME);
-	const binding = LOGIN_CSRF_TOKEN_PATTERN.test(existingBinding)
-		? existingBinding
-		: base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
-	const bindingHash = await hashLoginCsrfValue(env, binding);
-
-	for (let attempt = 0; attempt < 3; attempt += 1) {
-		const token = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
-		const tokenHash = await hashLoginCsrfValue(env, token);
-		const created = await env.DB.prepare(
-			`INSERT INTO login_csrf_tokens (token_hash, binding_hash, created_at, expires_at)
-			 VALUES (?, ?, ?, ?)
-			 ON CONFLICT(token_hash) DO NOTHING
-			 RETURNING token_hash`
-		)
-			.bind(tokenHash, bindingHash, now, now + LOGIN_CSRF_MAX_AGE_SECONDS * 1000)
-			.first<{ token_hash: string }>();
-		if (!created) continue;
-		return {
-			token,
-			setCookie: existingBinding === binding
-				? null
-				: `${LOGIN_CSRF_COOKIE_NAME}=${binding}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${LOGIN_CSRF_MAX_AGE_SECONDS}`,
-		};
-	}
-
-	throw new Error('failed to allocate a login CSRF token');
-}
-
-export async function consumeLoginCsrfToken(request: Request, env: AuthEnv, token: unknown) {
-	if (typeof token !== 'string' || !LOGIN_CSRF_TOKEN_PATTERN.test(token)) return false;
-	const binding = getCookie(request, LOGIN_CSRF_COOKIE_NAME);
-	if (!LOGIN_CSRF_TOKEN_PATTERN.test(binding)) return false;
-	const [tokenHash, bindingHash] = await Promise.all([
-		hashLoginCsrfValue(env, token),
-		hashLoginCsrfValue(env, binding),
-	]);
-	const consumed = await env.DB.prepare(
-		`DELETE FROM login_csrf_tokens
-		 WHERE token_hash = ? AND binding_hash = ? AND expires_at > ?
-		 RETURNING token_hash`
-	)
-		.bind(tokenHash, bindingHash, Date.now())
-		.first<{ token_hash: string }>();
-	return Boolean(consumed);
 }
 
 export async function cleanupOldLoginRateLimits(env: AuthEnv) {
