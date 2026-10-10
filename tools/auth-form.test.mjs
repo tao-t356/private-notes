@@ -61,6 +61,13 @@ test('mobile startup declares a fixed viewport and constrains every primary surf
   assert.match(styles, /\.login-wrap\s*\{[\s\S]*?width:\s*100%;/);
 });
 
+test('mobile note cards wrap long content and action columns without horizontal overflow',async()=>{
+  const styles=await read('public/styles.css');
+  assert.match(styles,/\.note-card-title,\s*\.note-card-text\s*\{[\s\S]*?overflow-wrap:\s*anywhere;/);
+  assert.match(styles,/\.note-card,\s*\.note-card-meta,\s*\.note-card-title,\s*\.note-card-text-wrap\s*\{[\s\S]*?min-width:\s*0;/);
+  assert.match(styles,/\.layout,\s*\.feed,\s*\.note-list,\s*\.group-block,[\s\S]*?min-width:\s*0;/);
+  assert.match(styles,/\.note-actions\s*\{[\s\S]*?display:\s*flex;/);
+});
 test('single-file Safari build and HTML revalidation prevent mixed old login modules',async()=>{
   const build=await read('tools/build-client.mjs');
   const bundle=await read('public/app.bundle.js');

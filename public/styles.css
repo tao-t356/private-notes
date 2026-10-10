@@ -358,6 +358,23 @@ button, input, textarea { font: inherit; }
   padding: 0 2px;
   border-radius: 4px;
 }
+.layout,
+.feed,
+.note-list,
+.group-block,
+.section-head,
+.note-card,
+.note-card-meta,
+.note-card-title,
+.note-card-text-wrap {
+  min-width: 0;
+}
+.note-card-title,
+.note-card-text {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .note-card {
   border: 1px solid #ececec;
   border-radius: 14px;
@@ -372,6 +389,10 @@ button, input, textarea { font: inherit; }
   color: var(--muted);
   font-size: 12px;
   margin-bottom: 8px;
+  min-width: 0;
+}
+.note-card-meta > * {
+  min-width: 0;
 }
 .note-card-title {
   font-size: 21px;
