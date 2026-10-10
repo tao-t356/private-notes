@@ -11,8 +11,13 @@
   --shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
 }
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
+html {
+  width: 100%;
+  overflow-x: hidden;
+  scroll-behavior: smooth;
+}
 body {
+  width: 100%;
   margin: 0;
   color: var(--text);
   font: 14px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -23,6 +28,7 @@ body {
 button, input, textarea { font: inherit; }
 .hidden { display: none !important; }
 .page {
+  width: 100%;
   max-width: 920px;
   margin: 0 auto;
   padding: 16px;
@@ -34,6 +40,7 @@ button, input, textarea { font: inherit; }
   box-shadow: var(--shadow);
 }
 .login-wrap {
+  width: 100%;
   position: fixed;
   inset: 0;
   z-index: 100;

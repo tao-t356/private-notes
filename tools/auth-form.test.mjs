@@ -52,6 +52,15 @@ test('one login form supports autofill and stays disabled if the script never lo
   assert.ok(app.includes('await loadNotesAfterLogin()'));
 });
 
+test('mobile startup declares a fixed viewport and constrains every primary surface to it',async()=>{
+  const [html, styles] = await Promise.all([read('public/index.html'), read('public/styles.css')]);
+  assert.match(html, /<meta name="viewport" content="width=device-width, initial-scale=1(?:\.0)?(?:, viewport-fit=cover)?"\s*\/>/);
+  assert.match(styles, /html\s*\{[\s\S]*?width:\s*100%;[\s\S]*?overflow-x:\s*hidden;/);
+  assert.match(styles, /body\s*\{[\s\S]*?width:\s*100%;/);
+  assert.match(styles, /\.page\s*\{[\s\S]*?width:\s*100%;/);
+  assert.match(styles, /\.login-wrap\s*\{[\s\S]*?width:\s*100%;/);
+});
+
 test('single-file Safari build and HTML revalidation prevent mixed old login modules',async()=>{
   const build=await read('tools/build-client.mjs');
   const bundle=await read('public/app.bundle.js');
