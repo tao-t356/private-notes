@@ -25,7 +25,7 @@
           </div>
           <form id="loginForm" action="/api/login" method="post" autocomplete="on">
             <h1 id="loginTitle" class="login-title">登录到我的笔记</h1>
-            <p id="loginDesc" class="login-desc">输入密码即可进入，记住后下次直接打开。</p>
+            <p id="loginDesc" class="login-desc">输入密码即可进入；记住设备后下次会恢复登录，再输入笔记密码解锁。</p>
 
             <div class="field-stack">
               <label class="field-label" for="passwordInput">密码</label>
@@ -40,7 +40,7 @@
 
           <button id="loginLogoutBtn" class="btn secondary hidden" type="button">重新登录</button>
           <label class="remember-device"><input id="rememberDevice" type="checkbox" checked /> 记住此设备，下次直接打开笔记</label>
-          <div class="field-help">仅用于自己的设备；保存登录凭证和解密密钥，不保存明文密码。退出后清除。</div>
+          <div class="field-help">仅用于自己的设备；只保存服务端登录会话，不保存密码或解密密钥。回来后仍需输入笔记密码解锁。</div>
           <div class="security-note">客户端加密开启后，D1 只保存密文；搜索会在本地浏览器里完成。忘记密码将无法恢复旧密文。</div>
           <div id="loginStatus" class="login-foot" role="status">正在加载登录组件；若长时间不变，请重新打开首页。</div>
           <noscript>请在 Safari 设置中启用 JavaScript 后重新打开本页。</noscript>
@@ -49,7 +49,7 @@
 
       <div id="deviceStatus" class="card device-status hidden" role="status"></div>
 
-      <section id="appView" class="app-dimmed">
+      <section id="appView">
         <header id="topbar" class="card topbar hidden-when-modal">
           <div>
             <h1 id="topbarTitle" class="topbar-title">我的笔记</h1>
@@ -57,12 +57,12 @@
           </div>
           <div class="topbar-actions">
             <div class="search-wrap">
-              <input id="searchInput" class="input search" placeholder="搜索标题或正文…" />
-              <button id="clearSearchBtn" class="clear-search" type="button" aria-label="清空搜索">×</button>
+              <input id="searchInput" class="input search" placeholder="搜索标题或正文…" disabled />
+              <button id="clearSearchBtn" class="clear-search" type="button" aria-label="清空搜索" disabled>×</button>
             </div>
-            <button id="searchBtn" class="btn secondary">搜索</button>
-            <button id="newBtn" class="btn topbar-new-btn">新建笔记</button>
-            <button id="logoutBtn" class="btn secondary">退出登录</button>
+            <button id="searchBtn" class="btn secondary" disabled>搜索</button>
+            <button id="newBtn" class="btn topbar-new-btn" disabled>新建笔记</button>
+            <button id="logoutBtn" class="btn secondary" disabled>退出登录</button>
           </div>
         </header>
 
@@ -77,15 +77,21 @@
                 <h2 class="section-title">全部笔记</h2>
                 <div class="section-desc">按最近更新排列，支持搜索、编辑、复制和分享。</div>
               </div>
-              <div id="noteCount" class="muted">0 条</div>
+              <div id="noteCount" class="muted">正在加载…</div>
             </div>
-            <div id="noteList" class="note-list"></div>
+            <div id="loadPanel" class="load-panel" role="status" aria-live="polite">
+              <p id="loadMessage">正在打开笔记…</p>
+              <button id="retryLoadBtn" class="btn secondary hidden" type="button">重试</button>
+              <noscript>请启用浏览器 JavaScript 后重新打开本页。</noscript>
+            </div>
+            <div id="noteList" class="note-list" aria-busy="true"></div>
+            <button id="loadMoreBtn" class="btn secondary load-more hidden" type="button">显示更多笔记</button>
           </section>
         </main>
       </section>
     </div>
 
-    <div id="editorModal" class="modal-backdrop hidden">
+    <div id="editorModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle" tabindex="-1">
       <div class="card modal-card">
         <div class="modal-head">
           <div>
@@ -97,6 +103,7 @@
         <input id="editorTitle" class="input" placeholder="标题" />
         <div class="editor-spacer"></div>
         <textarea id="editorContent" class="textarea" placeholder="# 今天想到什么&#10;&#10;- 一条记录&#10;- 一个链接&#10;- 一个待办"></textarea>
+        <p id="editorStatus" class="field-help" role="status"></p>
         <div class="modal-actions">
           <button id="cancelBtn" class="btn secondary">取消</button>
           <button id="saveBtn" class="btn">保存</button>
@@ -145,6 +152,6 @@
     <button id="fabNewBtn" class="btn fab-new hidden-when-modal" type="button" aria-label="新建笔记">＋</button>
     <button id="fabTopBtn" class="fab-top hidden-when-modal" type="button" aria-label="回到顶部">↑</button>
 
-    <script defer src="/app.bundle.js?v=20261008-simple"></script>
+    <script defer src="/app.bundle.js?v=20261010-stable"></script>
   </body>
 </html>

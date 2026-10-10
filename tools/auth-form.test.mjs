@@ -24,9 +24,20 @@ test('wrong passwords and invalid sessions fail without switching login protocol
   assert.equal(isLoginSession({...session(),token:'x'.repeat(4097)}),false);
 });
 
+test('index startup leaves the static login form visible until the bundle runs',async()=>{
+  const html=await read('public/index.html');
+  assert.match(html,/id="loginView"[^>]*class="login-wrap"(?! hidden)/);
+  assert.match(html,/id="loginForm"[^>]*action="\/api\/login"/);
+});
+
 test('one login form supports autofill and stays disabled if the script never loads',async()=>{
   const html=await read('public/index.html');
   const app=await read('public/app.js');
+  assert.match(html,/id="loginView"[^>]*class="login-wrap"(?! hidden)/);
+  assert.match(html,/id="loadPanel"[^>]*role="status"/);
+  assert.match(html,/id="retryLoadBtn"/);
+  assert.ok(app.includes('function showRestoring('));
+  assert.ok(app.includes('checkSession().catch('));
   assert.equal((html.match(/<form\b/g)||[]).length,1);
   assert.match(html,/id="passwordInput"[^>]*autocomplete="current-password"[^>]*name="password"/);
   assert.match(html,/id="passwordInput"[^>]*autocapitalize="none"[^>]*autocorrect="off"/);
@@ -45,6 +56,8 @@ test('single-file Safari build and HTML revalidation prevent mixed old login mod
   const build=await read('tools/build-client.mjs');
   const bundle=await read('public/app.bundle.js');
   const headers=await read('public/_headers');
+  assert.ok(build.includes("'share.bundle': 'public/share.js'"));
+  assert.match(await read('public/share.html'), /<script defer src="\/share.bundle.js\?/);
   assert.ok(build.includes("target: ['safari12']"));
   assert.ok(build.includes("format: 'iife'"));
   assert.ok(bundle.length>1000);
@@ -54,9 +67,9 @@ test('single-file Safari build and HTML revalidation prevent mixed old login mod
 
 test('remembered data contains no password, and logout clears it without waiting for the network',async()=>{
   const app=await read('public/app.js');
-  const persisted=app.slice(app.indexOf('deviceStore.save('),app.indexOf('async function loadNotesAfterLogin'));
-  assert.doesNotMatch(persisted,/password:|passphrase:/);
-  assert.ok(persisted.includes('key: state.vaultUnlocked ? vaultKeyBytes : null'));
+  const persisted = app.slice(app.indexOf('deviceStore.save('), app.indexOf('async function loadNotesAfterLogin'));
+  assert.doesNotMatch(persisted, /password:|passphrase:|vaultKeyBytes|key:|configId/);
+  assert.ok(persisted.includes('expiresAt: activeSession.expiresAt'));
   assert.ok(app.includes("headers.set('authorization', 'Bearer ' + activeSession.token)"));
   const logout=app.slice(app.indexOf('async function logout()'),app.indexOf('function resetLocalSession()'));
   assert.ok(logout.indexOf('deviceStore.clear()')<logout.indexOf('await request;'));

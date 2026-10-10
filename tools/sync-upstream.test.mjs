@@ -133,6 +133,18 @@ test('keeps Deploy to Cloudflare bindings valid without sharing an account datab
 	);
 });
 
+test('keeps the fresh-deployment template free of account resource IDs', () => {
+	const template = parseJsonc(readFileSync(new URL('../wrangler.example.jsonc', import.meta.url), 'utf8'));
+	const current = parseJsonc(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'));
+	assert.equal(template.account_id, undefined);
+	assert.equal(template.d1_databases[0].database_id, undefined);
+	assert.equal(template.d1_databases[0].preview_database_id, undefined);
+	assert.deepEqual(template.assets, current.assets);
+	assert.deepEqual(template.secrets, current.secrets);
+	assert.equal(template.main, current.main);
+	assert.equal(template.compatibility_date, current.compatibility_date);
+});
+
 test('installs the workflow template idempotently', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'private-notes-updater-'));
 	try {

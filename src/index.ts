@@ -146,23 +146,9 @@ const SESSION_RENEWAL_EXCLUDED_PATHS = new Set([
 	'/api/logout',
 ]);
 
-async function renewActiveSessionCookie(request: Request, env: AppEnv, response: Response) {
-	const pathname = new URL(request.url).pathname;
-	if (!pathname.startsWith('/api/') || SESSION_RENEWAL_EXCLUDED_PATHS.has(pathname)) return response;
-
-	try {
-		const cookieSecret = await resolveCookieSecret(env);
-		const sessionEnv =
-			cookieSecret === env.COOKIE_SECRET
-				? env
-				: (Object.assign(Object.create(env), { COOKIE_SECRET: cookieSecret }) as AppEnv);
-		const session = await getSession(request, sessionEnv);
-		return withSessionCookie(response, session.setCookie);
-	} catch (error) {
-		console.error('Session renewal failed', error instanceof Error ? error.message : typeof error);
-		return response;
-	}
-}
+type RequestContext = {
+	session?: Awaited<ReturnType<typeof getSession>>;
+};
 
 function getRequestId(request: Request) {
 	const ray = request.headers.get('cf-ray');
@@ -559,7 +545,7 @@ async function initializeVaultKeyCheck(env: AppEnv, vaultId: string, candidate: 
 	return row.value;
 }
 
-async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
+async function handleRequest(request: Request, env: AppEnv, context: RequestContext): Promise<Response> {
 	const url = new URL(request.url);
 	// Old Safari tabs may still submit the removed native form. Never authenticate
 	// these requests: send them back to the current page instead of a JSON error.
@@ -598,8 +584,14 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 		return serviceUnavailable();
 	}
 
+	const handlesOwnSession = request.method === 'POST' &&
+		(url.pathname === '/api/login' || url.pathname === '/api/logout');
+	if (url.pathname.startsWith('/api/') && !handlesOwnSession) {
+		context.session = await getSession(request, env);
+	}
+
 	if (url.pathname === '/api/session' && request.method === 'GET') {
-		const session = await getSession(request, env);
+		const session = context.session!;
 		return json(
 			{
 				ok: true,
@@ -667,7 +659,7 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 			: shareUnavailable();
 	}
 
-	const session = url.pathname.startsWith('/api/') ? await getSession(request, env) : null;
+	const session = context.session ?? null;
 	if (session && !session.authenticated) return unauthorized();
 	const vaultId = session?.vaultId || 'default';
 
@@ -737,7 +729,13 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 		)
 			.bind(id, vaultId, title, content, now, now)
 			.first<Note>();
-		if (!note) return json({ ok: false, error: 'conflict', code: 'id_conflict' }, 409);
+		if (!note) {
+			const existing = await getNote(env, id, vaultId);
+			if (existing && existing.title === title && existing.content === content) {
+				return json({ ok: true, note: existing });
+			}
+			return json({ ok: false, error: 'conflict', code: 'id_conflict' }, 409);
+		}
 		return json({ ok: true, note }, 201);
 	}
 
@@ -817,21 +815,21 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 export default {
 	async fetch(request: Request, env: AppEnv): Promise<Response> {
 		const requestId = getRequestId(request);
+		const context: RequestContext = {};
+		const pathname = new URL(request.url).pathname;
+		const finish = (response: Response) => withCommonHeaders(
+			withSessionCookie(response, SESSION_RENEWAL_EXCLUDED_PATHS.has(pathname) ? undefined : context.session?.setCookie),
+			requestId
+		);
 		try {
-			const response = await handleRequest(request, env);
-			return withCommonHeaders(await renewActiveSessionCookie(request, env, response), requestId);
+			return finish(await handleRequest(request, env, context));
 		} catch (error) {
 			if (error instanceof ApiError) {
-				const response = json({ ok: false, error: error.message, code: error.code }, error.status);
-				return withCommonHeaders(
-					await renewActiveSessionCookie(request, env, response),
-					requestId
-				);
+				return finish(json({ ok: false, error: error.message, code: error.code }, error.status));
 			}
 
 			console.error(`Unhandled request error (${requestId})`, error);
-			const response = json({ ok: false, error: 'internal_error', requestId }, 500);
-			return withCommonHeaders(await renewActiveSessionCookie(request, env, response), requestId);
+			return finish(json({ ok: false, error: 'internal_error', requestId }, 500));
 		}
 	},
 } satisfies ExportedHandler<Env>;

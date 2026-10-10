@@ -54,3 +54,7 @@
 /app.bundle.js
   ! Cache-Control
   Cache-Control: no-store
+
+/share.bundle.js
+  ! Cache-Control
+  Cache-Control: no-store

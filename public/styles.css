@@ -324,6 +324,17 @@ button, input, textarea { font: inherit; }
   display: grid;
   gap: 12px;
 }
+.load-panel {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--muted);
+}
+.load-panel p { margin: 0 0 12px; }
+.load-more {
+  display: block;
+  margin: 18px auto 0;
+}
+.modal-card [disabled] { cursor: wait; }
 .group-block {
   display: grid;
   gap: 10px;

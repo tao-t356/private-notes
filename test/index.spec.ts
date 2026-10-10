@@ -511,6 +511,34 @@ describe('private-notes worker', () => {
 		expect(activeSetCookie).toMatch(/(?:^|;\s*)Max-Age=31536000(?:;|$)/i);
 	});
 
+	it('looks up the managed signing key once per request and renews error responses', async () => {
+		const statements: string[] = [];
+		const database = new Proxy(env.DB, {
+			get(target, property) {
+				if (property === 'prepare') return (sql: string) => {
+					statements.push(sql);
+					return target.prepare(sql);
+				};
+				const value = Reflect.get(target, property, target);
+				return typeof value === 'function' ? value.bind(target) : value;
+			},
+		});
+		const managedEnv = { ...env, DB: database, COOKIE_SECRET: '' } as Parameters<typeof worker.fetch>[1];
+		const signedIn = await worker.fetch(new Request(`${ORIGIN}/api/login`, {
+			method: 'POST', headers: { 'content-type': 'application/json', 'cf-connecting-ip': '192.0.2.88' },
+			body: JSON.stringify({ password: DEFAULT_PASSWORD }),
+		}), managedEnv);
+		expect(signedIn.status).toBe(200);
+		const cookie = cookieFrom(signedIn);
+		for (const path of ['/api/notes', '/api/notes/not-a-uuid']) {
+			statements.length = 0;
+			const response = await worker.fetch(new Request(`${ORIGIN}${path}`, { headers: { cookie } }), managedEnv);
+			expect(response.status).toBe(path.endsWith('not-a-uuid') ? 400 : 200);
+			expect(response.headers.get('set-cookie')).toMatch(/^__Host-session=/);
+			expect(statements.filter(sql => sql.startsWith('SELECT value FROM app_meta WHERE key = ?'))).toHaveLength(1);
+		}
+	});
+
 	it('rejects malformed login requests and incorrect passwords', async () => {
 		const unsupported = await api('/api/login', { method: 'POST', body: '{}' });
 		expect(unsupported.status).toBe(415);
@@ -686,6 +714,29 @@ describe('private-notes worker', () => {
 			headers: { cookie, 'if-match': String(updatedRevision) },
 		});
 		expect(deleted.status).toBe(200);
+	});
+
+	it('replays identical note creation without duplicating or crossing vaults', async () => {
+		const { cookie } = await login();
+		const { cookie: guestCookie } = await login(GUEST_PASSWORD);
+		const id = crypto.randomUUID();
+		const body = JSON.stringify({ id, title: encryptedValue('retry-title'), content: encryptedValue('retry-content') });
+		const create = (sessionCookie: string, requestBody = body) => api('/api/notes', {
+			method: 'POST', headers: { cookie: sessionCookie, 'content-type': 'application/json' }, body: requestBody,
+		});
+		const first = await create(cookie);
+		expect(first.status).toBe(201);
+		const firstBody = await jsonBody(first);
+		const replay = await create(cookie);
+		expect(replay.status).toBe(200);
+		expect((await jsonBody(replay)).note).toEqual(firstBody.note);
+		const conflict = await create(cookie, JSON.stringify({ ...JSON.parse(body), content: encryptedValue('changed') }));
+		expect(conflict.status).toBe(409);
+		expect((await create(guestCookie)).status).toBe(409);
+		const stored = await api(`/api/notes/${id}`, { headers: { cookie } });
+		expect((await jsonBody(stored)).note).toEqual(firstBody.note);
+		const count = await env.DB.prepare('SELECT COUNT(*) AS count FROM notes WHERE id = ?').bind(id).first<{ count: number }>();
+		expect(count?.count).toBe(1);
 	});
 
 	it('enforces ciphertext field and request body size limits', async () => {

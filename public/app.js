@@ -1,35 +1,66 @@
 import { encryptSharedPayload } from './share-crypto.js';
 import { createQrSvg } from './qr.js';
 import { loginWithToken, isLoginSession } from './login-flow.js';
-import { createDeviceSessionStore, clearLegacyDeviceStore, DEVICE_SESSION_KEY } from './device-session.js';
+import { createDeviceSessionStore, clearLegacyDeviceStore, DEVICE_SESSION_KEY, LEGACY_DEVICE_SESSION_KEY, LOGOUT_EVENT_KEY } from './device-session.js';
 
 const deviceStore = createDeviceSessionStore();
 /** @type {import('./login-flow.js').LoginSession | null} */
 let activeSession = null;
 let storageMessage = '';
-let vaultKeyBytes = '';
 let authGeneration = 0;
+/** @type {Set<AbortController>} */
+const pendingRequests = new Set();
 clearLegacyDeviceStore();
+try { deviceStore.forgetLegacy(); } catch { /* Best effort cleanup only. */ }
 
 /**
  * @typedef {{ id: string, title: string, content: string, created_at: number, updated_at: number, revision: number }} RawNote
  * @typedef {RawNote & { encrypted: boolean, decryptFailed: boolean }} Note
  * @typedef {{ vaultSalt: string, cipher: 'aes-gcm-256', kdf: 'pbkdf2-sha256', iterations: number, version: 1, keyCheck: string | null }} CryptoConfig
+ * @typedef {{ title: string, content: string, payload: { id?: string, revision?: number, title: string, content: string } }} SaveAttempt
  */
 
 class VaultPasswordError extends Error {}
+class SessionChangedError extends Error {
+  constructor() { super('登录状态已改变'); }
+}
 
 const KEY_CHECK_MARKER = 'private-notes-key-check:v1';
+const NOTE_RENDER_BATCH_SIZE = 50;
+const dateFormatter = new Intl.DateTimeFormat('zh-CN', {
+  year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+});
+const dayFormatter = new Intl.DateTimeFormat('zh-CN', {
+  year: 'numeric', month: '2-digit', day: '2-digit'
+});
 
 /** @type {{
  * notes: Note[],
  * allNotes: Note[],
  * editingId: string | null,
+ * editingRevision: number | null,
+ * editorCreateId: string | null,
+ * editorOperationId: number,
+ * editorSaving: boolean,
+ * editorAttempt: SaveAttempt | null,
  * sharingNoteId: string | null,
  * shareOperationId: number,
  * shareCreating: boolean,
  * shareReturnFocus: HTMLElement | null,
  * loginSubmitting: boolean,
+ * restoreSubmitting: boolean,
+ * authView: 'restoring' | 'login' | 'app',
+ * restoreError: string,
+ * notesLoading: boolean,
+ * notesError: string,
+ * listReady: boolean,
+ * refreshOperationId: number,
+ * visibleLimit: number,
+ * searchQuery: string,
+ * searchTimer: number | null,
+ * searchComposing: boolean,
+ * searchIndex: Map<string, { title: string, content: string }>,
+ * deletingIds: Set<string>,
  * expandedIds: Set<string>,
  * statusTimer: number | null,
  * sessionAuthenticated: boolean,
@@ -47,11 +78,29 @@ const state = {
   notes: [],
   allNotes: [],
   editingId: null,
+  editingRevision: null,
+  editorCreateId: null,
+  editorOperationId: 0,
+  editorSaving: false,
+  editorAttempt: null,
   sharingNoteId: null,
   shareOperationId: 0,
   shareCreating: false,
   shareReturnFocus: null,
   loginSubmitting: false,
+  restoreSubmitting: false,
+  authView: 'restoring',
+  restoreError: '',
+  notesLoading: false,
+  notesError: '',
+  listReady: false,
+  refreshOperationId: 0,
+  visibleLimit: NOTE_RENDER_BATCH_SIZE,
+  searchQuery: '',
+  searchTimer: null,
+  searchComposing: false,
+  searchIndex: new Map(),
+  deletingIds: new Set(),
   expandedIds: new Set(),
   statusTimer: null,
   sessionAuthenticated: false,
@@ -129,10 +178,15 @@ const els = {
   vaultPanelDesc: getElement('vaultPanelDesc'),
   noteCount: getElement('noteCount'),
   noteList: getElement('noteList'),
+  loadPanel: getElement('loadPanel'),
+  loadMessage: getElement('loadMessage'),
+  retryLoadBtn: getButton('retryLoadBtn'),
+  loadMoreBtn: getButton('loadMoreBtn'),
   editorModal: getElement('editorModal'),
   modalTitle: getElement('modalTitle'),
   editorTitle: getInput('editorTitle'),
   editorContent: getTextArea('editorContent'),
+  editorStatus: getElement('editorStatus'),
   closeModalBtn: getButton('closeModalBtn'),
   cancelBtn: getButton('cancelBtn'),
   saveBtn: getButton('saveBtn'),
@@ -194,25 +248,40 @@ function updateLoginMode() {
   els.loginTitle.textContent = recovering ? '输入原笔记密码' : '登录到' + state.appShortName;
   els.loginDesc.textContent = recovering
     ? '访问密码已验证。旧笔记使用的是以前的密码，请输入原密码继续，不会改动笔记。'
-    : '输入密码即可进入，记住后下次直接打开。';
+    : '输入密码即可进入；记住设备后下次会恢复登录，再输入笔记密码解锁。';
   els.passwordInput.placeholder = recovering ? '原笔记密码' : '输入密码';
   els.passwordHelp.textContent = recovering ? '仅密码修改过的旧笔记需要这一步。' : '使用你设置的密码，不要求大小写或特殊符号。';
   els.loginBtn.textContent = state.loginSubmitting ? '正在打开…' : '进入笔记';
   els.loginLogoutBtn.classList.toggle('hidden', !recovering);
 }
 
+function updateLoadUi() {
+  const restoring = state.authView === 'restoring';
+  const error = restoring ? state.restoreError : state.notesError;
+  const loading = restoring ? !error : state.notesLoading || (!state.listReady && !error);
+  els.loadPanel.classList.toggle('hidden', state.authView === 'login' || (!loading && !error));
+  els.loadMessage.textContent = error || (restoring ? '正在恢复笔记…' : '正在加载笔记…');
+  els.retryLoadBtn.classList.toggle('hidden', !error);
+  els.retryLoadBtn.disabled = state.restoreSubmitting || state.notesLoading;
+  els.noteList.setAttribute('aria-busy', String(state.authView !== 'login' && loading));
+  if (state.authView !== 'login' && !state.listReady) els.noteCount.textContent = error ? '尚未加载' : '正在加载…';
+}
+
 function updateVaultUi() {
+  const ready = state.vaultUnlocked && state.listReady && !state.notesLoading;
   els.vaultPanel.classList.add('hidden');
-  els.searchInput.disabled = !state.vaultUnlocked;
-  els.searchBtn.disabled = !state.vaultUnlocked;
-  els.clearSearchBtn.disabled = !state.vaultUnlocked;
-  els.newBtn.disabled = !state.vaultUnlocked;
-  els.fabNewBtn.disabled = !state.vaultUnlocked;
+  els.searchInput.disabled = !ready;
+  els.searchBtn.disabled = !ready;
+  els.clearSearchBtn.disabled = !ready;
+  els.newBtn.disabled = !ready;
+  els.fabNewBtn.disabled = !ready;
+  els.logoutBtn.disabled = state.authView === 'login';
   els.vaultPanelDesc.textContent = state.unlockError
     ? state.unlockError + '。如果你已经忘记密码，旧密文无法在页面内恢复。'
     : state.noteCountMeta > 0
       ? '你当前有 ' + state.noteCountMeta + ' 条已加密笔记。请输入密码查看内容；忘记密码将无法在页面内恢复旧密文。'
       : '当前还没有可显示的解密内容。输入密码后可正常使用。';
+  updateLoadUi();
 }
 
 /** @param {Uint8Array} bytes */
@@ -279,7 +348,9 @@ async function getCryptoConfig() {
 }
 
 async function refreshMeta() {
+  const generation = authGeneration;
   const data = await api('/api/health');
+  if (generation !== authGeneration) return;
   state.noteCountMeta = data.noteCount || 0;
   updateVaultUi();
 }
@@ -289,11 +360,12 @@ async function refreshMeta() {
  * @param {CryptoConfig} config
  */
 async function deriveVaultKey(passphrase, config) {
-  if (!globalThis.crypto?.subtle) throw new Error('请使用 HTTPS 打开笔记，并启用浏览器 JavaScript');
+  const generation = authGeneration;
+  if (typeof crypto === 'undefined' || !crypto.subtle) throw new Error('请使用 HTTPS 打开笔记，并启用浏览器 JavaScript');
   const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveBits']);
   const bits = await crypto.subtle.deriveBits({name: 'PBKDF2', salt: base64ToBytes(config.vaultSalt),
     iterations: config.iterations, hash: 'SHA-256'}, material, 256);
-  vaultKeyBytes = bytesToBase64(new Uint8Array(bits));
+  if (generation !== authGeneration) throw new SessionChangedError();
   return crypto.subtle.importKey('raw', bits, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 
@@ -306,23 +378,23 @@ function isEncryptedValue(value) {
 
 /**
  * @param {string} value
+ * @param {CryptoKey | null} [key]
+ * @param {CryptoConfig | null} [config]
  */
-async function encryptValue(value) {
-  if (!state.cryptoConfig || !state.vaultKey) {
+async function encryptValue(value, key = state.vaultKey, config = state.cryptoConfig) {
+  if (!config || !key) {
     throw new Error('加密配置尚未就绪');
   }
 
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const cipherName = state.cryptoConfig.cipher === 'aes-gcm-256'
-    ? 'AES-GCM'
-    : state.cryptoConfig.cipher;
+  const cipherName = config.cipher === 'aes-gcm-256' ? 'AES-GCM' : config.cipher;
   const cipher = await crypto.subtle.encrypt(
     { name: cipherName, iv: iv },
-    state.vaultKey,
+    key,
     new TextEncoder().encode(value || '')
   );
 
-  return 'enc:v' + state.cryptoConfig.version + ':' + btoa(JSON.stringify({
+  return 'enc:v' + config.version + ':' + btoa(JSON.stringify({
     iv: bytesToBase64(iv),
     data: bytesToBase64(new Uint8Array(cipher))
   }));
@@ -381,12 +453,10 @@ async function decryptNotes(rawNotes) {
   /** @type {Note[]} */
   const decrypted = [];
   let failedCount = 0;
-  let legacyPlaintextCount = 0;
 
   for (const note of rawNotes) {
     try {
       const encrypted = isEncryptedValue(note.title) && isEncryptedValue(note.content);
-      if (!encrypted) legacyPlaintextCount += 1;
       decrypted.push({
         id: note.id,
         title: await decryptValue(note.title),
@@ -412,12 +482,44 @@ async function decryptNotes(rawNotes) {
     }
   }
 
-  state.decryptFailedCount = failedCount;
-  state.legacyPlaintextCount = legacyPlaintextCount;
-  if (rawNotes.length > 0 && failedCount === rawNotes.length) {
+  if (rawNotes.length > 0 && failedCount === rawNotes.length && !state.cryptoConfig?.keyCheck) {
     throw new VaultPasswordError('旧笔记需要原来的密码，请输入原密码');
   }
   return decrypted;
+}
+
+function refreshLocalMetadata() {
+  state.noteCountMeta = state.allNotes.length;
+  state.decryptFailedCount = state.allNotes.filter(function (note) { return note.decryptFailed; }).length;
+  state.legacyPlaintextCount = state.allNotes.filter(function (note) { return !note.encrypted; }).length;
+  const ids = new Set(state.allNotes.map(function (note) { return note.id; }));
+  state.searchIndex.forEach(function (_, id) { if (!ids.has(id)) state.searchIndex.delete(id); });
+  state.expandedIds.forEach(function (id) { if (!ids.has(id)) state.expandedIds.delete(id); });
+}
+
+/** @param {Note} note */
+function indexNote(note) {
+  state.searchIndex.set(note.id, {
+    title: (note.title || '').toLocaleLowerCase('zh-CN'),
+    content: (note.content || '').toLocaleLowerCase('zh-CN')
+  });
+}
+
+/** @param {Note} note */
+function upsertLocalNote(note) {
+  state.refreshOperationId += 1;
+  state.notesLoading = false;
+  state.notesError = '';
+  state.listReady = true;
+  state.allNotes = state.allNotes.filter(function (item) { return item.id !== note.id; });
+  state.allNotes.push(note);
+  state.allNotes.sort(function (a, b) {
+    return b.updated_at - a.updated_at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
+  });
+  indexNote(note);
+  refreshLocalMetadata();
+  updateVaultUi();
+  applySearch();
 }
 
 /**
@@ -431,29 +533,55 @@ function filterNotes(notes, query) {
   if (!q) return notes;
   return notes.filter(function (note) {
     if (note.decryptFailed) return true;
-    return (note.title || '').toLocaleLowerCase('zh-CN').includes(q)
-      || (note.content || '').toLocaleLowerCase('zh-CN').includes(q);
+    if (!state.searchIndex.has(note.id)) indexNote(note);
+    const indexed = state.searchIndex.get(note.id);
+    return Boolean(indexed && (indexed.title.includes(q) || indexed.content.includes(q)));
   });
 }
 
+function cancelSearch() {
+  if (state.searchTimer !== null) window.clearTimeout(state.searchTimer);
+  state.searchTimer = null;
+}
+
+function scheduleSearch() {
+  cancelSearch();
+  if (state.searchComposing) return;
+  state.searchTimer = window.setTimeout(applySearch, 150);
+}
+
 function applySearch() {
-  state.notes = filterNotes(state.allNotes, els.searchInput.value);
-  state.expandedIds.forEach(function (id) {
-    if (!state.notes.find(function (note) { return note.id === id; })) {
-      state.expandedIds.delete(id);
-    }
-  });
+  cancelSearch();
+  const query = els.searchInput.value.trim();
+  if (state.searchQuery !== query) state.visibleLimit = NOTE_RENDER_BATCH_SIZE;
+  state.searchQuery = query;
+  state.notes = filterNotes(state.allNotes, query);
   renderList();
 }
 
 function showLogin() {
+  if (state.authView === 'login' && state.sessionAuthenticated && activeSession) {
+    state.authMode = 'recover';
+  }
+  state.authView = 'login';
   els.loginView.classList.remove('hidden');
   els.appView.classList.add('app-dimmed');
   updateLoginMode();
+  updateVaultUi();
+}
+
+/** @param {string} [error] */
+function showRestoring(error = '') {
+  state.authView = 'restoring';
+  state.restoreError = error;
+  els.loginView.classList.add('hidden');
+  els.appView.classList.remove('app-dimmed');
+  updateVaultUi();
 }
 
 function showApp() {
   if (state.sessionAuthenticated && state.vaultUnlocked) {
+    state.authView = 'app';
     els.loginView.classList.add('hidden');
     els.appView.classList.remove('app-dimmed');
   } else {
@@ -464,14 +592,7 @@ function showApp() {
 
 /** @param {number} ts */
 function formatDate(ts) {
-  if (!ts) return '-';
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  }).format(new Date(ts));
+  return ts ? dateFormatter.format(new Date(ts)) : '-';
 }
 
 /** @param {number} ts */
@@ -485,11 +606,7 @@ function formatGroupLabel(ts) {
   const diffDays = Math.floor((startOf(now) - startOf(d)) / 86400000);
   if (diffDays === 0) return '今天';
   if (diffDays === 1) return '昨天';
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  }).format(d);
+  return dayFormatter.format(d);
 }
 
 /** @param {string} text */
@@ -543,17 +660,38 @@ async function api(url, options) {
   const generation = authGeneration;
   const headers = new Headers(options?.headers);
   if (activeSession && url !== '/api/login') headers.set('authorization', 'Bearer ' + activeSession.token);
-  const controller = new AbortController();
-  const timer = setTimeout(function () { controller.abort(); }, 15000);
-  let res;
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  if (controller && url !== '/api/logout') pendingRequests.add(controller);
+  let timer = 0;
+  /** @type {Promise<never>} */
+  const deadline = new Promise(function (_, reject) {
+    timer = window.setTimeout(function () {
+      if (controller) controller.abort();
+      reject(new Error('request timed out'));
+    }, 15000);
+  });
+  let result;
   try {
-    res = await fetch(url, Object.assign({}, options || {}, {
-      credentials: 'same-origin', mode: 'same-origin', cache: 'no-store', headers: headers, signal: controller.signal
-    }));
+    result = await Promise.race([
+      (async function () {
+        const res = await fetch(url, Object.assign({}, options || {}, {
+          credentials: 'same-origin', mode: 'same-origin', cache: 'no-store', headers: headers,
+          signal: controller ? controller.signal : undefined
+        }));
+        const data = await res.json().catch(function () { return {}; });
+        return { res: res, data: data };
+      }()),
+      deadline
+    ]);
   } catch {
+    if (generation !== authGeneration) throw new SessionChangedError();
     throw new Error('连接中断或超时，请重试；无需重新设置密码');
-  } finally { clearTimeout(timer); }
-  const data = await res.json().catch(function () { return {}; });
+  } finally {
+    window.clearTimeout(timer);
+    if (controller) pendingRequests.delete(controller);
+  }
+  const res = result.res;
+  const data = result.data;
   if (res.status === 401) {
     if (url === '/api/login') throw new Error('密码不正确，请重试');
     if (generation === authGeneration) { forgetDevice(); resetLocalSession(); }
@@ -561,7 +699,10 @@ async function api(url, options) {
   }
   if (!res.ok) {
     if (res.status === 409 && data.error === 'revision_conflict') {
-      throw new Error('这条笔记已在其他页面更新，请刷新后再编辑');
+      throw new Error('这条笔记已在其他页面更新，当前输入已保留，请先复制内容再重新打开笔记');
+    }
+    if (res.status === 409 && data.code === 'id_conflict') {
+      throw new Error('此前的新建请求可能已经保存，当前输入已保留，请先复制内容再刷新确认');
     }
     if (res.status === 503 && data.code === 'auth_not_configured') {
       throw new Error('服务端认证尚未正确配置，请检查必需 Secrets');
@@ -577,6 +718,7 @@ async function api(url, options) {
  * @returns {Promise<RawNote[]>}
  */
 async function fetchRawNotes() {
+  const generation = authGeneration;
   /** @type {RawNote[]} */
   const notes = [];
   /** @type {string | null} */
@@ -588,6 +730,7 @@ async function fetchRawNotes() {
       ? '?limit=10&cursor=' + encodeURIComponent(cursor)
       : '?limit=10';
     const data = await api('/api/notes' + query);
+    if (generation !== authGeneration) throw new SessionChangedError();
     if (!Array.isArray(data.notes)) {
       throw new Error('服务器返回的笔记列表格式无效');
     }
@@ -608,6 +751,11 @@ async function fetchRawNotes() {
 
 function renderList() {
   els.noteList.innerHTML = '';
+  els.loadMoreBtn.classList.add('hidden');
+  if (state.authView === 'restoring' || (state.vaultUnlocked && !state.listReady)) {
+    updateLoadUi();
+    return;
+  }
   els.noteCount.textContent = state.notes.length ? ('共 ' + state.notes.length + ' 条') : '0 条';
   if (state.decryptFailedCount > 0) {
     els.noteCount.textContent += ' · ' + state.decryptFailedCount + ' 条无法解密';
@@ -618,7 +766,7 @@ function renderList() {
 
   if (!state.vaultUnlocked) {
     els.noteCount.textContent = state.noteCountMeta ? ('共 ' + state.noteCountMeta + ' 条（已加密）') : '0 条';
-    els.noteList.innerHTML = '<div class="empty-feed">正文已加密。登录站点后，再输入本地解锁密钥才能看到内容和搜索结果。</div>';
+    els.noteList.innerHTML = '<div class="empty-feed">正文已加密。登录站点后，再输入笔记密码才能看到内容和搜索结果。</div>';
     return;
   }
 
@@ -642,9 +790,13 @@ function renderList() {
     els.noteList.appendChild(warning);
   }
 
+  const visibleNotes = state.notes.slice(0, state.visibleLimit);
+  const remaining = state.notes.length - visibleNotes.length;
+  els.loadMoreBtn.classList.toggle('hidden', remaining === 0);
+  els.loadMoreBtn.textContent = '显示更多笔记（剩余 ' + remaining + ' 条）';
   /** @type {Map<string, Note[]>} */
   const groups = new Map();
-  state.notes.forEach(function (note) {
+  visibleNotes.forEach(function (note) {
     const key = formatGroupLabel(note.updated_at);
     const group = groups.get(key);
     if (group) {
@@ -684,11 +836,12 @@ function renderList() {
       copyBtn.textContent = '复制全文';
       copyBtn.disabled = note.decryptFailed;
       copyBtn.onclick = async function () {
+        const generation = authGeneration;
         try {
           await navigator.clipboard.writeText(note.content || '');
-          setStatus('已复制：' + (note.title || '无标题'));
+          if (generation === authGeneration) setStatus('已复制：' + (note.title || '无标题'));
         } catch (error) {
-          setStatus('复制失败，请手动选择文本复制');
+          if (generation === authGeneration) setStatus('复制失败，请手动选择文本复制');
         }
       };
 
@@ -749,7 +902,10 @@ function renderList() {
           } else {
             state.expandedIds.add(note.id);
           }
-          renderList();
+          const currentDisplay = getDisplayContent(note);
+          body.textContent = note.content ? currentDisplay.text : '这条笔记还没有内容。';
+          bodyWrap.classList.toggle('collapsed', currentDisplay.canExpand && !currentDisplay.expanded);
+          toggleBtn.textContent = currentDisplay.expanded ? '收起' : '展开全文';
         };
         card.appendChild(toggleBtn);
       }
@@ -762,111 +918,192 @@ function renderList() {
 }
 
 async function refreshNotes() {
-  if (!state.vaultUnlocked) {
-    state.notes = [];
-    state.allNotes = [];
-    state.decryptFailedCount = 0;
-    state.legacyPlaintextCount = 0;
-    await refreshMeta();
-    renderList();
-    return;
-  }
-
   const generation = authGeneration;
-  const rawNotes = await fetchRawNotes();
-  if (generation !== authGeneration || !state.vaultUnlocked) return;
-  const notes = await decryptNotes(rawNotes);
-  if (generation !== authGeneration || !state.vaultUnlocked) return;
-  state.allNotes = notes;
-  state.noteCountMeta = state.allNotes.length;
+  const operationId = ++state.refreshOperationId;
+  state.notesLoading = true;
+  state.notesError = '';
   updateVaultUi();
-  applySearch();
+  try {
+    if (!state.vaultUnlocked) {
+      await refreshMeta();
+      if (generation !== authGeneration || operationId !== state.refreshOperationId) return;
+      state.notes = [];
+      state.allNotes = [];
+      state.searchIndex.clear();
+      state.decryptFailedCount = 0;
+      state.legacyPlaintextCount = 0;
+      renderList();
+      return;
+    }
+
+    const rawNotes = await fetchRawNotes();
+    if (generation !== authGeneration || operationId !== state.refreshOperationId) return;
+    const notes = await decryptNotes(rawNotes);
+    if (generation !== authGeneration || operationId !== state.refreshOperationId || !state.vaultUnlocked) return;
+    state.allNotes = notes;
+    state.listReady = true;
+    state.searchIndex.clear();
+    notes.forEach(indexNote);
+    refreshLocalMetadata();
+    applySearch();
+  } catch (error) {
+    if (generation !== authGeneration || operationId !== state.refreshOperationId) return;
+    state.notesError = error instanceof Error ? error.message : '笔记加载失败，请重试';
+    throw error;
+  } finally {
+    if (generation === authGeneration && operationId === state.refreshOperationId) {
+      state.notesLoading = false;
+      updateVaultUi();
+    }
+  }
+}
+
+function createNoteId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+  const hex = Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, '0'); }).join('');
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
+}
+
+/** @param {boolean} saving */
+function setEditorSaving(saving) {
+  state.editorSaving = saving;
+  [els.saveBtn, els.cancelBtn, els.closeModalBtn, els.editorTitle, els.editorContent].forEach(function (element) {
+    element.disabled = saving;
+  });
+  els.saveBtn.textContent = saving ? '保存中…' : '保存';
+  els.editorModal.setAttribute('aria-busy', String(saving));
+}
+
+/** @param {number} operationId @param {number} generation */
+function isCurrentEditorOperation(operationId, generation) {
+  return operationId === state.editorOperationId && generation === authGeneration &&
+    !els.editorModal.classList.contains('hidden');
 }
 
 /** @param {Note | null} note */
 function openComposer(note) {
+  if (state.editorSaving) { setStatus('正在保存，请稍候'); return; }
+  if (!state.vaultUnlocked || !state.listReady || state.notesLoading || note?.decryptFailed) return;
+  state.editorOperationId += 1;
   state.editingId = note ? note.id : null;
+  state.editingRevision = note ? note.revision : null;
+  state.editorCreateId = note ? null : createNoteId();
+  state.editorAttempt = null;
+  setEditorSaving(false);
   els.modalTitle.textContent = note ? '编辑笔记' : '新建笔记';
   els.editorTitle.value = note ? note.title : '';
   els.editorContent.value = note ? note.content : '';
+  els.editorStatus.textContent = '';
   els.editorModal.classList.remove('hidden');
   updateModalUi();
   els.editorTitle.focus();
 }
 
-function closeComposer() {
+/** @param {boolean} [force] */
+function closeComposer(force = false) {
+  if (state.editorSaving && !force) { setStatus('正在保存，请稍候'); return; }
+  state.editorOperationId += 1;
+  setEditorSaving(false);
   els.editorModal.classList.add('hidden');
   state.editingId = null;
+  state.editingRevision = null;
+  state.editorCreateId = null;
+  state.editorAttempt = null;
+  els.editorTitle.value = '';
+  els.editorContent.value = '';
+  els.editorStatus.textContent = '';
   updateModalUi();
 }
 
 async function saveComposer() {
-  const title = els.editorTitle.value.trim() || '无标题';
-  const content = els.editorContent.value.trim();
-  if (!title && !content) {
-    setStatus('标题和内容至少写一个');
+  if (state.editorSaving || els.editorModal.classList.contains('hidden')) return;
+  const titleInput = els.editorTitle.value.trim();
+  const content = els.editorContent.value;
+  if (!titleInput && !content.trim()) {
+    els.editorStatus.textContent = '标题和内容至少写一个';
     return;
   }
-  if (!state.vaultUnlocked || !state.vaultKey) {
-    setStatus('请先输入本地解锁密钥');
+  if (!state.vaultUnlocked || !state.vaultKey || !state.cryptoConfig) {
+    els.editorStatus.textContent = '请先输入笔记密码解锁';
     return;
   }
 
-  setStatus('保存中…');
-
-  const encryptedTitle = await encryptValue(title);
-  const encryptedContent = await encryptValue(content);
-
-  let data;
-  if (state.editingId) {
-    const currentNote = state.allNotes.find(function (note) {
-      return note.id === state.editingId;
-    });
-    if (!currentNote) {
-      throw new Error('找不到待编辑的笔记，请刷新后重试');
+  const title = titleInput || '无标题';
+  const editingId = state.editingId;
+  const revision = state.editingRevision;
+  const createId = state.editorCreateId;
+  if ((editingId && (!Number.isSafeInteger(revision) || Number(revision) < 1)) || (!editingId && !createId)) {
+    throw new Error('编辑状态无效，请保留内容并重新打开编辑器');
+  }
+  const key = state.vaultKey;
+  const config = state.cryptoConfig;
+  const operationId = state.editorOperationId;
+  const generation = authGeneration;
+  setEditorSaving(true);
+  els.editorStatus.textContent = '保存中…';
+  try {
+    let attempt = state.editorAttempt;
+    if (!attempt || attempt.title !== title || attempt.content !== content) {
+      const encryptedValues = await Promise.all([
+        encryptValue(title, key, config), encryptValue(content, key, config)
+      ]);
+      if (!isCurrentEditorOperation(operationId, generation)) return;
+      attempt = {
+        title: title,
+        content: content,
+        payload: Object.assign({ title: encryptedValues[0], content: encryptedValues[1] },
+          editingId ? { revision: Number(revision) } : { id: String(createId) })
+      };
+      state.editorAttempt = attempt;
     }
-    data = await api('/api/notes/' + encodeURIComponent(state.editingId), {
-      method: 'PUT',
+    if (!isCurrentEditorOperation(operationId, generation)) return;
+    const data = await api(editingId ? '/api/notes/' + encodeURIComponent(editingId) : '/api/notes', {
+      method: editingId ? 'PUT' : 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        title: encryptedTitle,
-        content: encryptedContent,
-        revision: currentNote.revision
-      })
+      body: JSON.stringify(attempt.payload)
     });
-  } else {
-    data = await api('/api/notes', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: encryptedTitle, content: encryptedContent })
-    });
+    if (!isCurrentEditorOperation(operationId, generation)) return;
+    const saved = /** @type {RawNote | undefined} */ (data.note);
+    if (!saved || saved.id !== (editingId || createId) || !Number.isSafeInteger(saved.revision) ||
+      !Number.isSafeInteger(saved.created_at) || !Number.isSafeInteger(saved.updated_at)) {
+      throw new Error('保存响应不完整，当前输入已保留，请重试确认');
+    }
+    upsertLocalNote({ ...saved, title: title, content: content, encrypted: true, decryptFailed: false });
+    closeComposer(true);
+    setStatus('已保存');
+  } catch (error) {
+    if (!isCurrentEditorOperation(operationId, generation)) return;
+    els.editorStatus.textContent = error instanceof Error ? error.message : '保存失败，当前输入已保留';
+    throw error;
+  } finally {
+    if (isCurrentEditorOperation(operationId, generation)) setEditorSaving(false);
   }
-
-  closeComposer();
-  await refreshNotes();
-  setStatus('已保存');
 }
 
 /** @param {string} id */
 async function deleteNote(id) {
-  if (!id) {
-    setStatus('当前没有可删除的记录');
-    return;
-  }
+  if (!state.vaultUnlocked || !state.listReady || state.notesLoading || state.deletingIds.has(id)) return;
+  const currentNote = state.allNotes.find(function (note) { return note.id === id; });
+  if (!currentNote || currentNote.decryptFailed) return;
   if (!confirm('确定删除这条笔记吗？')) return;
-
-  const currentNote = state.allNotes.find(function (note) {
-    return note.id === id;
-  });
-  if (!currentNote) throw new Error('找不到待删除的笔记，请刷新后重试');
-
-  await api('/api/notes/' + encodeURIComponent(id), {
-    method: 'DELETE',
-    headers: { 'if-match': String(currentNote.revision) }
-  });
-
-  await refreshNotes();
-  setStatus('已删除');
+  const generation = authGeneration;
+  state.deletingIds.add(id);
+  try {
+    await api('/api/notes/' + encodeURIComponent(id), {
+      method: 'DELETE',
+      headers: { 'if-match': String(currentNote.revision) }
+    });
+    if (generation !== authGeneration) return;
+    state.refreshOperationId += 1;
+    state.allNotes = state.allNotes.filter(function (note) { return note.id !== id; });
+    refreshLocalMetadata();
+    applySearch();
+    setStatus('已删除');
+  } finally {
+    if (generation === authGeneration) state.deletingIds.delete(id);
+  }
 }
 
 /** @param {Note} note */
@@ -982,10 +1219,12 @@ async function createShareLink() {
   }
 
   const noteId = note.id;
+  const generation = authGeneration;
   const operationId = ++state.shareOperationId;
   setShareCreating(true);
   try {
     const encrypted = await encryptShare(note);
+    if (generation !== authGeneration || !isCurrentShareOperation(operationId, noteId)) return;
     const data = await api('/api/shares', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -1042,12 +1281,14 @@ async function createShareLink() {
 }
 
 async function copyShareLink() {
+  const generation = authGeneration;
   const link = els.shareLinkInput.value;
   if (!link) throw new Error('请先创建分享链接');
   try {
     await navigator.clipboard.writeText(link);
-    setStatus('分享链接已复制');
+    if (generation === authGeneration) setStatus('分享链接已复制');
   } catch {
+    if (generation !== authGeneration) return;
     els.shareLinkInput.focus();
     els.shareLinkInput.select();
     setStatus('请手动复制已选中的链接');
@@ -1075,7 +1316,10 @@ async function verifyKeyCheck(config) {
  * @param {CryptoConfig} config
  */
 async function initializeKeyCheck(config) {
-  const encryptedMarker = await encryptValue(KEY_CHECK_MARKER);
+  const generation = authGeneration;
+  const key = state.vaultKey;
+  const encryptedMarker = await encryptValue(KEY_CHECK_MARKER, key, config);
+  if (generation !== authGeneration) throw new SessionChangedError();
   let data;
   try {
     data = await api('/api/crypto-config/key-check', {
@@ -1087,6 +1331,7 @@ async function initializeKeyCheck(config) {
     throw new Error('无法初始化密钥校验标记。请确认后端已升级，然后退出当前会话并重新登录');
   }
 
+  if (generation !== authGeneration) throw new SessionChangedError();
   if (typeof data.keyCheck !== 'string' || !data.keyCheck) {
     throw new Error('服务器未返回有效的密钥校验标记');
   }
@@ -1107,13 +1352,20 @@ async function unlockVault(passphrase) {
   if (generation !== authGeneration) return;
   state.vaultUnlocked = true;
   state.unlockError = '';
-  // Only old databases without a marker need to verify existing ciphertext
-  // before setting one. Normal logins no longer wait for loading every note.
+  // Older databases without a marker need one successful decrypt pass before
+  // initialization. Keep the authenticated shell visible if that pass fails;
+  // the retry button can repeat only the list load without another login.
   if (!config.keyCheck) {
-    await refreshNotes();
-    if (generation !== authGeneration) return;
-    if (state.decryptFailedCount > 0) throw new VaultPasswordError('旧笔记需要原来的密码，请输入原密码');
-    await initializeKeyCheck(config);
+    try {
+      await refreshNotes();
+      if (generation !== authGeneration) return;
+      if (state.decryptFailedCount > 0) throw new VaultPasswordError('旧笔记需要原来的密码，请输入原密码');
+      await initializeKeyCheck(config);
+    } catch (error) {
+      if (generation !== authGeneration) return;
+      if (error instanceof VaultPasswordError) throw error;
+      state.notesError = error instanceof Error ? error.message : '笔记加载失败，请重试';
+    }
   }
 }
 
@@ -1130,11 +1382,10 @@ function forgetDevice() {
 function rememberCurrentDevice() {
   storageMessage = '';
   try {
-    if (!els.rememberDevice.checked) { deviceStore.clear(); return; }
+    if (!els.rememberDevice.checked) { deviceStore.clear(); deviceStore.forgetLegacy(); return; }
     if (!activeSession) return;
-    deviceStore.save({token: activeSession.token, vaultId: activeSession.vaultId, expiresAt: activeSession.expiresAt,
-      key: state.vaultUnlocked ? vaultKeyBytes : null,
-      configId: state.vaultUnlocked && state.cryptoConfig ? cryptoConfigId(state.cryptoConfig) : ''});
+    deviceStore.save({token: activeSession.token, vaultId: activeSession.vaultId, expiresAt: activeSession.expiresAt});
+    deviceStore.forgetLegacy();
   } catch {
     storageMessage = '当前浏览器不允许记住登录，本次仍可使用；关闭后需再次输入密码。';
   } finally {
@@ -1144,46 +1395,75 @@ function rememberCurrentDevice() {
 }
 
 async function loadNotesAfterLogin() {
-  try { await refreshNotes(); }
-  catch (error) { setStatus(error instanceof Error ? error.message : '笔记加载失败，请刷新重试'); }
+  const generation = authGeneration;
+  try {
+    await refreshNotes();
+    if (generation !== authGeneration || !state.vaultUnlocked) return;
+    // A legacy vault may have failed its first initialization because the
+    // notes request was transiently unavailable. Retry the marker write after
+    // the notes are successfully loaded, without asking for the password again.
+    if (state.cryptoConfig && !state.cryptoConfig.keyCheck && state.decryptFailedCount === 0) {
+      await initializeKeyCheck(state.cryptoConfig);
+      if (generation !== authGeneration) return;
+    }
+  }
+  catch (error) {
+    if (generation !== authGeneration) return;
+    state.notesError = error instanceof Error ? error.message : '笔记加载失败，请重试';
+    updateLoadUi();
+  }
 }
 
 async function checkSession() {
+  if (state.restoreSubmitting) return;
   const generation = authGeneration;
-  let saved;
-  try { saved = deviceStore.load(); } catch { return; }
-  if (!saved) return;
-  activeSession = saved;
+  state.restoreSubmitting = true;
+  showRestoring();
   try {
+    let saved;
+    try { saved = deviceStore.load(); }
+    catch {
+      showLogin();
+      els.loginStatus.textContent = '无法读取本机登录记录，请输入密码继续';
+      return;
+    }
+    if (!saved) { showLogin(); return; }
+    // v3 deliberately stores no vault key. Restore the server session only;
+    // the user must enter the vault password again to unlock local ciphertext.
+    deviceStore.forgetLegacy();
+    activeSession = saved;
     const data = await api('/api/session');
     if (generation !== authGeneration) return;
-    if (!data.authenticated || !isLoginSession(data)) {
+    if (!data.authenticated || !isLoginSession(data) || saved.vaultId !== data.vaultId) {
       forgetDevice(); resetLocalSession(); return;
     }
     activeSession = data;
     state.sessionAuthenticated = true;
-    if (!saved.key || saved.vaultId !== data.vaultId) return;
     const config = await getCryptoConfig();
     if (generation !== authGeneration) return;
-    if (!config.keyCheck || saved.configId !== cryptoConfigId(config)) { forgetDevice(); return; }
-    const key = await crypto.subtle.importKey('raw', base64ToBytes(saved.key), 'AES-GCM', false, ['encrypt', 'decrypt']);
-    if (generation !== authGeneration) return;
-    state.vaultKey = key;
-    await verifyKeyCheck(config);
-    if (generation !== authGeneration) return;
-    vaultKeyBytes = saved.key;
-    state.vaultUnlocked = true;
-    rememberCurrentDevice();
-    showApp();
-    await loadNotesAfterLogin();
+    state.cryptoConfig = config;
+    state.authMode = 'recover';
+    showLogin();
+    els.loginStatus.textContent = '已恢复登录会话，请输入原笔记密码解锁';
+    return;
   } catch (error) {
     if (generation !== authGeneration) return;
-    if (error instanceof VaultPasswordError) forgetDevice();
     state.vaultKey = null;
     state.vaultUnlocked = false;
-    vaultKeyBytes = '';
-    els.loginStatus.textContent = error instanceof Error ? error.message : '自动登录未完成，请输入密码';
-    showLogin();
+    const message = error instanceof Error ? error.message : '暂时无法恢复笔记，请重试';
+    if (error instanceof VaultPasswordError) {
+      forgetDevice();
+      state.authMode = 'recover';
+      showLogin();
+      els.loginStatus.textContent = message;
+    } else {
+      showRestoring(message);
+    }
+  } finally {
+    if (generation === authGeneration) {
+      state.restoreSubmitting = false;
+      updateLoadUi();
+    }
   }
 }
 
@@ -1215,7 +1495,6 @@ els.loginForm.addEventListener('submit', async function (event) {
     if (generation !== authGeneration) return;
     state.vaultUnlocked = false;
     state.vaultKey = null;
-    vaultKeyBytes = '';
     if (error instanceof VaultPasswordError && activeSession) {
       state.authMode = 'recover';
       clearSensitiveInputs();
@@ -1223,10 +1502,22 @@ els.loginForm.addEventListener('submit', async function (event) {
     showLogin();
     els.loginStatus.textContent = error instanceof Error ? error.message : '打开失败，请重试';
   } finally {
-    state.loginSubmitting = false;
-    updateLoginMode();
+    if (generation === authGeneration) {
+      state.loginSubmitting = false;
+      updateLoginMode();
+    }
   }
 });
+
+els.retryLoadBtn.onclick = function () {
+  const task = state.authView === 'restoring' ? checkSession() : loadNotesAfterLogin();
+  task.catch(function (error) { setStatus(error instanceof Error ? error.message : '加载失败，请重试'); });
+};
+
+els.loadMoreBtn.onclick = function () {
+  state.visibleLimit += NOTE_RENDER_BATCH_SIZE;
+  renderList();
+};
 
 els.searchBtn.onclick = function () {
   applySearch();
@@ -1235,11 +1526,21 @@ els.searchBtn.onclick = function () {
 
 els.searchInput.addEventListener('input', function () {
   updateSearchUi();
-  applySearch();
+  scheduleSearch();
+});
+
+els.searchInput.addEventListener('compositionstart', function () {
+  state.searchComposing = true;
+  cancelSearch();
+});
+
+els.searchInput.addEventListener('compositionend', function () {
+  state.searchComposing = false;
+  scheduleSearch();
 });
 
 els.searchInput.addEventListener('keydown', function (event) {
-  if (event.key === 'Enter') els.searchBtn.click();
+  if (event.key === 'Enter' && !state.searchComposing && !event.isComposing) els.searchBtn.click();
 });
 
 els.clearSearchBtn.onclick = function () {
@@ -1261,26 +1562,42 @@ els.fabTopBtn.onclick = function () {
 };
 
 async function logout() {
-  // Start cookie cleanup with the current token, but always clear this device,
-  // even offline. A failed logout request must not leave a remembered AES key.
+  // Cookie cleanup must not delay local locking, even when the device is offline.
   const request = api('/api/logout', { method: 'POST' }).catch(function () {});
-  activeSession = null;
   resetLocalSession();
-  try { deviceStore.clear(); clearLegacyDeviceStore(); }
+  try { deviceStore.clear(); }
   catch { els.loginStatus.textContent = '未能清除设备记录，请清除此站点的浏览器数据。'; }
+  try { deviceStore.notifyLogout(); }
+  catch { els.loginStatus.textContent += ' 无法通知其他标签页，请一并关闭它们。'; }
+  clearLegacyDeviceStore();
   await request;
 }
 
 function resetLocalSession() {
   authGeneration += 1;
-  vaultKeyBytes = '';
+  pendingRequests.forEach(function (controller) { controller.abort(); });
+  pendingRequests.clear();
+  cancelSearch();
   state.authMode = 'login';
   activeSession = null;
   els.deviceStatus.classList.add('hidden');
-  closeComposer();
+  closeComposer(true);
   closeShareDialog(true);
   state.notes = [];
   state.allNotes = [];
+  state.searchIndex.clear();
+  state.expandedIds.clear();
+  state.deletingIds.clear();
+  state.searchQuery = '';
+  state.searchComposing = false;
+  state.visibleLimit = NOTE_RENDER_BATCH_SIZE;
+  state.refreshOperationId += 1;
+  state.notesLoading = false;
+  state.notesError = '';
+  state.listReady = false;
+  state.restoreSubmitting = false;
+  state.restoreError = '';
+  state.loginSubmitting = false;
   state.sessionAuthenticated = false;
   state.vaultUnlocked = false;
   state.vaultKey = null;
@@ -1288,16 +1605,22 @@ function resetLocalSession() {
   state.noteCountMeta = 0;
   state.decryptFailedCount = 0;
   state.legacyPlaintextCount = 0;
+  els.searchInput.value = '';
+  els.shareNoteLabel.textContent = '';
+  els.shareExpiryLabel.textContent = '';
+  els.vaultPanelDesc.textContent = '';
   clearSensitiveInputs();
   state.unlockError = '';
   els.loginStatus.textContent = '';
+  updateSearchUi();
   showLogin();
   renderList();
   setStatus('');
 }
 
 window.addEventListener('storage', function (event) {
-  if ((event.key === DEVICE_SESSION_KEY || event.key === null) && event.newValue === null) resetLocalSession();
+  const deviceRemoved = (event.key === DEVICE_SESSION_KEY || event.key === null) && event.newValue === null;
+  if (deviceRemoved || (event.key === LOGOUT_EVENT_KEY && event.newValue !== null)) resetLocalSession();
 });
 
 els.logoutBtn.onclick = function () {
@@ -1312,8 +1635,8 @@ els.loginLogoutBtn.onclick = function () {
   });
 };
 
-els.closeModalBtn.onclick = closeComposer;
-els.cancelBtn.onclick = closeComposer;
+els.closeModalBtn.onclick = function () { closeComposer(); };
+els.cancelBtn.onclick = function () { closeComposer(); };
 els.saveBtn.onclick = function () {
   saveComposer().catch(function (error) {
     setStatus(error.message || '保存失败');
@@ -1378,12 +1701,7 @@ document.addEventListener('keydown', function (event) {
 
 window.addEventListener('scroll', updateScrollUi, { passive: true });
 
-updateSearchUi();
-updateScrollUi();
-updateModalUi();
-showLogin();
 els.loginStatus.textContent = '';
 checkSession().catch(function (error) {
-  showLogin();
-  els.loginStatus.textContent = error instanceof Error ? error.message : '无法连接到服务';
+  showRestoring(error instanceof Error ? error.message : '无法连接到服务，请重试');
 });

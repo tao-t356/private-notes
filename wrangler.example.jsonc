@@ -1,0 +1,25 @@
+// 仅用于首次部署到新账号。已有部署请保留原 wrangler.jsonc 和数据库 ID。
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "private-notes",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-07-15",
+	"compatibility_flags": ["global_fetch_strictly_public"],
+	"preview_urls": false,
+	"workers_dev": true,
+	"keep_vars": true,
+	"secrets": { "required": ["APP_PASSWORD"] },
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS",
+		"run_worker_first": ["/api/*", "/", "/index.html", "/share", "/share.html", "/manifest.webmanifest"]
+	},
+	"d1_databases": [{
+		"binding": "DB",
+		"database_name": "private-notes-db",
+		"migrations_dir": "migrations",
+		"migrations_table": "d1_migrations"
+	}],
+	"observability": { "enabled": true },
+	"upload_source_maps": true
+}
