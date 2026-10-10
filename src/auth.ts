@@ -5,7 +5,7 @@ type AuthEnv = {
 	COOKIE_SECRET?: string;
 };
 
-export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 365;
+export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 export const SESSION_COOKIE_NAME = '__Host-session';
 export const MAX_PASSWORD_LENGTH = 1024;
 
@@ -295,8 +295,10 @@ export async function getSession(request: Request, env: AuthEnv): Promise<Sessio
 		return { authenticated: false, vaultId: DEFAULT_VAULT_ID };
 	}
 
-	// An explicit token must never silently fall back to a different cookie vault.
+	// Explicit bearer tokens remain accepted for Safari's in-memory fallback,
+	// but the browser never persists them. Normal startup uses only the cookie.
 	const authorization = request.headers.get('authorization');
+	const usesBearer = authorization !== null;
 	const session =
 		authorization !== null
 			? (/^Bearer ([A-Za-z0-9_.-]+)$/i.exec(authorization)?.[1] || '')
@@ -311,8 +313,12 @@ export async function getSession(request: Request, env: AuthEnv): Promise<Sessio
 		...(refreshedToken
 			? {
 					setCookie: createSessionCookie(refreshedToken),
-					token: refreshedToken,
-					expiresAt: (Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SECONDS) * 1000,
+					...(usesBearer
+						? {
+								token: refreshedToken,
+								expiresAt: (Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SECONDS) * 1000,
+							}
+						: {}),
 				}
 			: {}),
 	};

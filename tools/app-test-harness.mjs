@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { webcrypto } from 'node:crypto';
 import { createContext, runInContext } from 'node:vm';
-const { createDeviceSessionStore, DEVICE_SESSION_KEY, LEGACY_DEVICE_SESSION_KEY, LOGOUT_EVENT_KEY } = await import('../public/device-session.js');
+const { createLogoutSignal, LOGOUT_EVENT_KEY } = await import('../public/device-session.js');
+const { createMemoryVaultKeyBackend, createVaultKeyStore } = await import('../public/vault-key-store.js');
 import { isLoginSession, loginWithToken } from '../public/login-flow.js';
 import { encryptSharedPayload } from '../public/share-crypto.js';
 import { createQrSvg } from '../public/qr.js';
@@ -148,16 +149,14 @@ export async function createVaultFixture() {
   const config = { vaultSalt: btoa('s'.repeat(16)), cipher: 'aes-gcm-256', kdf: 'pbkdf2-sha256', iterations: 250000, version: 1,
     keyCheck: await encrypt('private-notes-key-check:v1') };
   const session = { token: 'test.signed.session', vaultId: 'default', expiresAt: Date.now() + 600000 };
-  const record = { ...session };
-  return { key, config, session, record, encrypt };
+  return { key, config, session, encrypt };
 }
 
 export function note(id = '11111111-1111-4111-8111-111111111111', title = '标题', content = '正文', revision = 1000) {
   return { id, title, content, revision, created_at: 1000, updated_at: revision, encrypted: true, decryptFailed: false };
 }
 
-export async function loadApp({ hub = storageHub(), record, fetch: fetchHandler, fixture, notes = [] } = {}) {
-  if (record) hub.data.set(DEVICE_SESSION_KEY, JSON.stringify(record));
+export async function loadApp({ hub = storageHub(), fetch: fetchHandler, fixture, notes = [], vaultBackend = createMemoryVaultKeyBackend(), vaultTimeoutMs } = {}) {
   const elements = new Map();
   const events = new Map();
   const history = [];
@@ -185,8 +184,8 @@ export async function loadApp({ hub = storageHub(), record, fetch: fetchHandler,
       setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout },
     HTMLElement: Element, HTMLInputElement: Element, HTMLTextAreaElement: Element,
     HTMLSelectElement: Element, HTMLButtonElement: Element,
-    createDeviceSessionStore: () => createDeviceSessionStore(storage), clearLegacyDeviceStore() {},
-    DEVICE_SESSION_KEY, LEGACY_DEVICE_SESSION_KEY, LOGOUT_EVENT_KEY, isLoginSession, loginWithToken, encryptSharedPayload, createQrSvg,
+    createLogoutSignal: () => createLogoutSignal(storage), createVaultKeyStore: () => createVaultKeyStore({ backend: vaultBackend, timeoutMs: vaultTimeoutMs }), clearLegacyDeviceStore() {},
+    LOGOUT_EVENT_KEY, isLoginSession, loginWithToken, encryptSharedPayload, createQrSvg,
     crypto: webcrypto, Headers, AbortController, URL, Response, TextEncoder, TextDecoder, Uint8Array, Promise, Error, TypeError, Intl,
     btoa, atob, console, confirm: () => true,
     navigator: { clipboard: { writeText: async () => {} } },
@@ -207,8 +206,23 @@ export async function loadApp({ hub = storageHub(), record, fetch: fetchHandler,
 
 export async function readyApp(options = {}) {
   const fixture = options.fixture || await createVaultFixture();
-  const app = await loadApp({ ...options, fixture });
+  let booting = true;
+  const operationFetch = options.fetch;
+  const app = await loadApp({
+    ...options,
+    fixture,
+    fetch: (url, requestOptions) => {
+      if (booting && url === '/api/session') return jsonResponse({ ok: true, authenticated: false });
+      return operationFetch
+        ? operationFetch(url, requestOptions)
+        : jsonResponse({ ok: true, notes: [], nextCursor: null });
+    }
+  });
   await app.boot;
+  booting = false;
+  // Startup now checks the HttpOnly cookie on every page load. Operation tests
+  // should observe only the requests made by the operation under test.
+  app.calls.length = 0;
   app.run(`
     activeSession = fixture.session;
     state.sessionAuthenticated = true;

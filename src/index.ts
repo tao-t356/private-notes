@@ -139,6 +139,19 @@ function withSessionCookie(response: Response, sessionCookie?: string) {
 	});
 }
 
+function withSessionRenewal(response: Response, sessionToken?: string) {
+	if (!sessionToken) return response;
+	const headers = new Headers(response.headers);
+	// Safari's in-memory bearer fallback cannot read HttpOnly Set-Cookie. This
+	// same-origin, no-store response header carries only the renewed bearer.
+	headers.set('x-session-token', sessionToken);
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	});
+}
+
 const SESSION_RENEWAL_EXCLUDED_PATHS = new Set([
 	'/api/session',
 	'/api/login',
@@ -597,8 +610,7 @@ async function handleRequest(request: Request, env: AppEnv, context: RequestCont
 				ok: true,
 				authenticated: session.authenticated,
 				vaultId: session.vaultId,
-				token: session.token,
-				expiresAt: session.expiresAt,
+				...(session.token ? { token: session.token, expiresAt: session.expiresAt } : {}),
 			},
 			200,
 			session.setCookie ? { 'set-cookie': session.setCookie } : {}
@@ -818,7 +830,10 @@ export default {
 		const context: RequestContext = {};
 		const pathname = new URL(request.url).pathname;
 		const finish = (response: Response) => withCommonHeaders(
-			withSessionCookie(response, SESSION_RENEWAL_EXCLUDED_PATHS.has(pathname) ? undefined : context.session?.setCookie),
+			withSessionRenewal(
+				withSessionCookie(response, SESSION_RENEWAL_EXCLUDED_PATHS.has(pathname) ? undefined : context.session?.setCookie),
+				context.session?.token
+			),
 			requestId
 		);
 		try {

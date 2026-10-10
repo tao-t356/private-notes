@@ -1,9 +1,13 @@
 import { encryptSharedPayload } from './share-crypto.js';
 import { createQrSvg } from './qr.js';
 import { loginWithToken, isLoginSession } from './login-flow.js';
-import { createDeviceSessionStore, clearLegacyDeviceStore, DEVICE_SESSION_KEY, LEGACY_DEVICE_SESSION_KEY, LOGOUT_EVENT_KEY } from './device-session.js';
+import { createVaultKeyStore } from './vault-key-store.js';
+import { createLogoutSignal, clearLegacyDeviceStore, LOGOUT_EVENT_KEY } from './device-session.js';
 
-const deviceStore = createDeviceSessionStore();
+// The session is cookie-backed. This signal store is used only for cross-tab
+// logout notifications; it never stores a credential.
+const deviceSignal = createLogoutSignal();
+const vaultKeyStore = createVaultKeyStore();
 /** @type {import('./login-flow.js').LoginSession | null} */
 let activeSession = null;
 let storageMessage = '';
@@ -11,7 +15,6 @@ let authGeneration = 0;
 /** @type {Set<AbortController>} */
 const pendingRequests = new Set();
 clearLegacyDeviceStore();
-try { deviceStore.forgetLegacy(); } catch { /* Best effort cleanup only. */ }
 
 /**
  * @typedef {{ id: string, title: string, content: string, created_at: number, updated_at: number, revision: number }} RawNote
@@ -68,6 +71,7 @@ const dayFormatter = new Intl.DateTimeFormat('zh-CN', {
  * vaultUnlocked: boolean,
  * vaultKey: CryptoKey | null,
  * cryptoConfig: CryptoConfig | null,
+ * autoUnlockDisabled: boolean,
  * noteCountMeta: number,
  * decryptFailedCount: number,
  * legacyPlaintextCount: number,
@@ -108,6 +112,7 @@ const state = {
   vaultUnlocked: false,
   vaultKey: null,
   cryptoConfig: null,
+  autoUnlockDisabled: false,
   noteCountMeta: 0,
   decryptFailedCount: 0,
   legacyPlaintextCount: 0,
@@ -659,7 +664,11 @@ function getDisplayContent(note) {
 async function api(url, options) {
   const generation = authGeneration;
   const headers = new Headers(options?.headers);
-  if (activeSession && url !== '/api/login') headers.set('authorization', 'Bearer ' + activeSession.token);
+  // Keep the existing Safari fallback in page memory only. It is never written
+  // to localStorage or IndexedDB; normal browsers use the HttpOnly cookie.
+  if (activeSession?.token && url !== '/api/login') {
+    headers.set('authorization', 'Bearer ' + activeSession.token);
+  }
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   if (controller && url !== '/api/logout') pendingRequests.add(controller);
   let timer = 0;
@@ -694,8 +703,15 @@ async function api(url, options) {
   const data = result.data;
   if (res.status === 401) {
     if (url === '/api/login') throw new Error('密码不正确，请重试');
-    if (generation === authGeneration) { forgetDevice(); resetLocalSession(); }
+    if (generation === authGeneration) {
+      resetLocalSession();
+      await forgetDevice();
+    }
     throw new Error('登录已失效，请重新输入密码');
+  }
+  const renewedToken = res.headers.get('x-session-token');
+  if (renewedToken && activeSession && generation === authGeneration) {
+    activeSession = Object.assign({}, activeSession, { token: renewedToken });
   }
   if (!res.ok) {
     if (res.status === 409 && data.error === 'revision_conflict') {
@@ -1339,16 +1355,89 @@ async function initializeKeyCheck(config) {
   await verifyKeyCheck(config);
 }
 
+/** @param {CryptoConfig} config */
+async function restoreVaultKey(config) {
+  const generation = authGeneration;
+  if (!config.keyCheck || !els.rememberDevice.checked || state.autoUnlockDisabled) {
+    if (!els.rememberDevice.checked || (!config.keyCheck && activeSession?.vaultId)) {
+      state.autoUnlockDisabled = true;
+      await forgetDevice();
+    }
+    return null;
+  }
+  const identity = { vaultId: activeSession?.vaultId || '', configId: cryptoConfigId(config) };
+  if (!identity.vaultId) return null;
+  let key = null;
+  try {
+    key = await vaultKeyStore.load(identity);
+  } catch {
+    // Safari private browsing and disabled IndexedDB fall back to manual entry.
+    return null;
+  }
+  if (!key) return null;
+  if (generation !== authGeneration) return null;
+  state.vaultKey = key;
+  try {
+    await verifyKeyCheck(config);
+    if (generation !== authGeneration) {
+      state.vaultKey = null;
+      return null;
+    }
+    return key;
+  } catch (error) {
+    state.vaultKey = null;
+    try { await vaultKeyStore.clear(); } catch { /* Best effort cleanup. */ }
+    if (error instanceof VaultPasswordError) return null;
+    throw error;
+  }
+}
+
+/** @param {CryptoConfig} config @param {CryptoKey} key */
+async function persistVaultKey(config, key, expectedGeneration = authGeneration) {
+  const generation = expectedGeneration;
+  storageMessage = '';
+  if (generation !== authGeneration) return;
+  const remember = els.rememberDevice.checked;
+  if (!remember) state.autoUnlockDisabled = true;
+  try {
+    if (!remember) {
+      await vaultKeyStore.clear();
+    } else {
+      if (generation !== authGeneration || !activeSession?.vaultId) return;
+      await vaultKeyStore.save({ vaultId: activeSession?.vaultId || '', configId: cryptoConfigId(config), key });
+    }
+    if (generation !== authGeneration) return;
+    if (remember) {
+      state.autoUnlockDisabled = false;
+      storageMessage = '';
+    } else {
+      storageMessage = '自动解锁已关闭：本次不会恢复本机解密密钥。';
+    }
+  } catch {
+    if (generation === authGeneration) {
+      storageMessage = '自动解锁已关闭：当前浏览器不允许保存或清除解密密钥。';
+      state.autoUnlockDisabled = true;
+    }
+  } finally {
+    if (generation === authGeneration) {
+      els.deviceStatus.textContent = storageMessage;
+      els.deviceStatus.classList.toggle('hidden', !storageMessage);
+    }
+  }
+}
+
 /**
  * @param {string} passphrase
  */
 async function unlockVault(passphrase) {
   const generation = authGeneration;
-  const config = await getCryptoConfig();
-  const key = await deriveVaultKey(passphrase, config);
+  const config = state.cryptoConfig || await getCryptoConfig();
+  const restoredKey = await restoreVaultKey(config);
+  let key = restoredKey;
+  if (!key) key = await deriveVaultKey(passphrase, config);
   if (generation !== authGeneration) return;
   state.vaultKey = key;
-  await verifyKeyCheck(config);
+  if (!restoredKey) await verifyKeyCheck(config);
   if (generation !== authGeneration) return;
   state.vaultUnlocked = true;
   state.unlockError = '';
@@ -1367,6 +1456,8 @@ async function unlockVault(passphrase) {
       state.notesError = error instanceof Error ? error.message : '笔记加载失败，请重试';
     }
   }
+  if (generation !== authGeneration) return;
+  await persistVaultKey(config, key, generation);
 }
 
 /** @param {CryptoConfig} config */
@@ -1374,23 +1465,15 @@ function cryptoConfigId(config) {
   return JSON.stringify([config.version, config.vaultSalt, config.kdf, config.iterations, config.cipher, config.keyCheck]);
 }
 
-function forgetDevice() {
-  try { deviceStore.clear(); } catch { /* The page can still be used without storage. */ }
+async function forgetDevice() {
+  state.autoUnlockDisabled = true;
   clearLegacyDeviceStore();
-}
-
-function rememberCurrentDevice() {
-  storageMessage = '';
   try {
-    if (!els.rememberDevice.checked) { deviceStore.clear(); deviceStore.forgetLegacy(); return; }
-    if (!activeSession) return;
-    deviceStore.save({token: activeSession.token, vaultId: activeSession.vaultId, expiresAt: activeSession.expiresAt});
-    deviceStore.forgetLegacy();
+    await vaultKeyStore.clear();
   } catch {
-    storageMessage = '当前浏览器不允许记住登录，本次仍可使用；关闭后需再次输入密码。';
-  } finally {
+    storageMessage = '自动解锁已关闭：未能清除本机解密密钥，请清除此站点的浏览器数据。';
     els.deviceStatus.textContent = storageMessage;
-    els.deviceStatus.classList.toggle('hidden', !storageMessage);
+    els.deviceStatus.classList.remove('hidden');
   }
 }
 
@@ -1420,31 +1503,30 @@ async function checkSession() {
   state.restoreSubmitting = true;
   showRestoring();
   try {
-    let saved;
-    try { saved = deviceStore.load(); }
-    catch {
-      showLogin();
-      els.loginStatus.textContent = '无法读取本机登录记录，请输入密码继续';
-      return;
-    }
-    if (!saved) { showLogin(); return; }
-    // v3 deliberately stores no vault key. Restore the server session only;
-    // the user must enter the vault password again to unlock local ciphertext.
-    deviceStore.forgetLegacy();
-    activeSession = saved;
     const data = await api('/api/session');
     if (generation !== authGeneration) return;
-    if (!data.authenticated || !isLoginSession(data) || saved.vaultId !== data.vaultId) {
-      forgetDevice(); resetLocalSession(); return;
+    if (!data.authenticated || !isLoginSession(data)) {
+      resetLocalSession();
+      await forgetDevice();
+      return;
     }
     activeSession = data;
     state.sessionAuthenticated = true;
     const config = await getCryptoConfig();
     if (generation !== authGeneration) return;
     state.cryptoConfig = config;
-    state.authMode = 'recover';
-    showLogin();
-    els.loginStatus.textContent = '已恢复登录会话，请输入原笔记密码解锁';
+    const restoredKey = await restoreVaultKey(config);
+    if (generation !== authGeneration) return;
+    if (restoredKey) {
+      state.vaultUnlocked = true;
+      state.authMode = 'login';
+      showApp();
+      await loadNotesAfterLogin();
+    } else {
+      state.authMode = 'recover';
+      showLogin();
+      els.loginStatus.textContent = '已恢复登录会话，请输入笔记密码解锁';
+    }
     return;
   } catch (error) {
     if (generation !== authGeneration) return;
@@ -1452,7 +1534,7 @@ async function checkSession() {
     state.vaultUnlocked = false;
     const message = error instanceof Error ? error.message : '暂时无法恢复笔记，请重试';
     if (error instanceof VaultPasswordError) {
-      forgetDevice();
+      await forgetDevice();
       state.authMode = 'recover';
       showLogin();
       els.loginStatus.textContent = message;
@@ -1485,7 +1567,6 @@ els.loginForm.addEventListener('submit', async function (event) {
     }
     await unlockVault(password);
     if (generation !== authGeneration) return;
-    rememberCurrentDevice();
     clearSensitiveInputs();
     state.authMode = 'login';
     showApp();
@@ -1495,6 +1576,9 @@ els.loginForm.addEventListener('submit', async function (event) {
     if (generation !== authGeneration) return;
     state.vaultUnlocked = false;
     state.vaultKey = null;
+    if (error instanceof VaultPasswordError) {
+      await forgetDevice();
+    }
     if (error instanceof VaultPasswordError && activeSession) {
       state.authMode = 'recover';
       clearSensitiveInputs();
@@ -1565,9 +1649,8 @@ async function logout() {
   // Cookie cleanup must not delay local locking, even when the device is offline.
   const request = api('/api/logout', { method: 'POST' }).catch(function () {});
   resetLocalSession();
-  try { deviceStore.clear(); }
-  catch { els.loginStatus.textContent = '未能清除设备记录，请清除此站点的浏览器数据。'; }
-  try { deviceStore.notifyLogout(); }
+  await forgetDevice();
+  try { deviceSignal.notifyLogout(); }
   catch { els.loginStatus.textContent += ' 无法通知其他标签页，请一并关闭它们。'; }
   clearLegacyDeviceStore();
   await request;
@@ -1619,8 +1702,10 @@ function resetLocalSession() {
 }
 
 window.addEventListener('storage', function (event) {
-  const deviceRemoved = (event.key === DEVICE_SESSION_KEY || event.key === null) && event.newValue === null;
-  if (deviceRemoved || (event.key === LOGOUT_EVENT_KEY && event.newValue !== null)) resetLocalSession();
+  if (event.key === LOGOUT_EVENT_KEY && event.newValue !== null) {
+    resetLocalSession();
+    void forgetDevice();
+  }
 });
 
 els.logoutBtn.onclick = function () {

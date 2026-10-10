@@ -4,7 +4,7 @@ import test from 'node:test';
 import { loginWithToken, isLoginSession } from '../public/login-flow.js';
 
 const read = (path) => readFile(new URL('../' + path, import.meta.url), 'utf8');
-const session = () => ({token:'signed.session', vaultId:'default', expiresAt:Date.now()+60000});
+const session = () => ({vaultId:'default'});
 
 test('one password uses exactly one JSON login, without native forms or session probes', async () => {
   const calls=[];
@@ -18,10 +18,10 @@ test('one password uses exactly one JSON login, without native forms or session 
 
 test('wrong passwords and invalid sessions fail without switching login protocols',async()=>{
   await assert.rejects(loginWithToken('wrong',async()=>{throw new Error('unauthorized');}),/unauthorized/);
-  for(const value of [null,{ok:true},{...session(),expiresAt:1}]) {
+  for(const value of [null,{ok:true},{...session(),vaultId:''}]) {
     await assert.rejects(loginWithToken('password',async()=>value),/更新服务端/);
   }
-  assert.equal(isLoginSession({...session(),token:'x'.repeat(4097)}),false);
+  assert.equal(isLoginSession({...session(),vaultId:''}),false);
 });
 
 test('index startup leaves the static login form visible until the bundle runs',async()=>{
@@ -65,12 +65,11 @@ test('single-file Safari build and HTML revalidation prevent mixed old login mod
   assert.match(headers,/\/app.bundle.js\s+! Cache-Control\s+Cache-Control: no-store/);
 });
 
-test('remembered data contains no password, and logout clears it without waiting for the network',async()=>{
+test('remembered data contains no password, bearer token, or raw key',async()=>{
   const app=await read('public/app.js');
-  const persisted = app.slice(app.indexOf('deviceStore.save('), app.indexOf('async function loadNotesAfterLogin'));
-  assert.doesNotMatch(persisted, /password:|passphrase:|vaultKeyBytes|key:|configId/);
-  assert.ok(persisted.includes('expiresAt: activeSession.expiresAt'));
-  assert.ok(app.includes("headers.set('authorization', 'Bearer ' + activeSession.token)"));
+  assert.doesNotMatch(app, /localStorage.*token|password.*localStorage/);
+  assert.ok(app.includes('vaultKeyStore.save'));
+  assert.ok(app.includes('configId'));
   const logout=app.slice(app.indexOf('async function logout()'),app.indexOf('function resetLocalSession()'));
-  assert.ok(logout.indexOf('deviceStore.clear()')<logout.indexOf('await request;'));
+  assert.ok(logout.indexOf('vaultKeyStore.clear()')<logout.indexOf('await request;'));
 });

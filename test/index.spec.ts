@@ -467,7 +467,7 @@ describe('private-notes worker', () => {
 		expect(setCookie).toMatch(/(?:^|;\s*)Secure(?:;|$)/i);
 		expect(setCookie).toMatch(/(?:^|;\s*)SameSite=Strict(?:;|$)/i);
 		expect(setCookie).toMatch(/(?:^|;\s*)Path=\/(?:;|$)/i);
-		expect(setCookie).toMatch(/(?:^|;\s*)Max-Age=31536000(?:;|$)/i);
+		expect(setCookie).toMatch(/(?:^|;\s*)Max-Age=604800(?:;|$)/i);
 		expect(setCookie).not.toMatch(/(?:^|;\s*)Domain=/i);
 		expect(response.headers.get('x-request-id')).toBeTruthy();
 
@@ -494,7 +494,7 @@ describe('private-notes worker', () => {
 		expect(renewedSetCookie).toMatch(/(?:^|;\s*)Secure(?:;|$)/i);
 		expect(renewedSetCookie).toMatch(/(?:^|;\s*)SameSite=Strict(?:;|$)/i);
 		expect(renewedSetCookie).toMatch(/(?:^|;\s*)Path=\/(?:;|$)/i);
-		expect(renewedSetCookie).toMatch(/(?:^|;\s*)Max-Age=31536000(?:;|$)/i);
+		expect(renewedSetCookie).toMatch(/(?:^|;\s*)Max-Age=604800(?:;|$)/i);
 		expect(renewedSetCookie).not.toMatch(/(?:^|;\s*)Domain=/i);
 	const renewedCookie = cookieFrom(renewed);
 		expect(renewedCookie).not.toBe(cookie);
@@ -508,7 +508,7 @@ describe('private-notes worker', () => {
 		expect(activeSetCookie).toMatch(/(?:^|;\s*)Secure(?:;|$)/i);
 		expect(activeSetCookie).toMatch(/(?:^|;\s*)SameSite=Strict(?:;|$)/i);
 		expect(activeSetCookie).toMatch(/(?:^|;\s*)Path=\/(?:;|$)/i);
-		expect(activeSetCookie).toMatch(/(?:^|;\s*)Max-Age=31536000(?:;|$)/i);
+		expect(activeSetCookie).toMatch(/(?:^|;\s*)Max-Age=604800(?:;|$)/i);
 	});
 
 	it('looks up the managed signing key once per request and renews error responses', async () => {
@@ -1084,17 +1084,20 @@ describe('cookie-independent device sessions', () => {
     const { response } = await login();
     const issued = await jsonBody(response);
     expect(issued.token).toBeTruthy();
-    expect(Number(issued.expiresAt)).toBeGreaterThan(Date.now() + 364 * 86400000);
+    expect(Number(issued.expiresAt)).toBeGreaterThan(Date.now() + 6 * 86400000);
     const headers = { authorization: 'Bearer ' + issued.token };
     const restored = await api('/api/session', { headers });
     const renewed = await jsonBody(restored);
     expect(renewed).toMatchObject({ authenticated: true, vaultId: 'default' });
     expect(renewed.token).toBeTruthy();
     expect(Number(renewed.expiresAt)).toBeGreaterThanOrEqual(Number(issued.expiresAt));
+    expect(restored.headers.get('x-session-token')).toBe(renewed.token);
     expect(restored.headers.get('cache-control')).toBe('no-store');
-    const notes = await api('/api/notes', { headers });
+    const renewedHeaders = { authorization: 'Bearer ' + renewed.token };
+    const notes = await api('/api/notes', { headers: renewedHeaders });
     expect(notes.status).toBe(200);
     expect((await jsonBody(notes)).notes).toEqual([]);
+    expect(notes.headers.get('x-session-token')).toBeTruthy();
   });
 
   it('an explicit invalid token cannot fall back to a valid cookie', async () => {

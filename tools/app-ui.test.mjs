@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { DEVICE_SESSION_KEY } from '../public/device-session.js';
+import { createMemoryVaultKeyBackend } from '../public/vault-key-store.js';
 import { createVaultFixture, deferred, jsonResponse, loadApp, note, readyApp, storageHub } from './app-test-harness.mjs';
 
 const A = '11111111-1111-4111-8111-111111111111';
@@ -27,12 +27,12 @@ function savedResponse(url, options, revision = 5000) {
     created_at: 1000, updated_at: revision, revision } }, options.method === 'POST' ? 201 : 200);
 }
 
-test('remembered refresh restores the server session and asks for the vault password', async () => {
+test('cookie session restoration asks for the vault password when no persisted key is available', async () => {
   const fixture = await createVaultFixture();
   const session = deferred();
   const raw = { ...note(A), title: await fixture.encrypt('私人标题'), content: await fixture.encrypt('私人正文') };
   const handle = restoreHandler(fixture, [raw]);
-  const app = await loadApp({ record: fixture.record, fetch: url => url === '/api/session' ? session.promise : handle(url) });
+  const app = await loadApp({ fetch: url => url === '/api/session' ? session.promise : handle(url) });
   assert.equal(app.run('state.authView'), 'restoring');
   assert.equal(loginWasShown(app), false);
   assert.equal(app.elements.get('loginView').classList.contains('hidden'), true);
@@ -48,31 +48,82 @@ test('remembered refresh restores the server session and asks for the vault pass
   assert.ok(![...app.hub.data.values()].join('').includes('私人正文'));
 });
 
-test('missing and expired records show login without a session request', async () => {
+test('a matching persisted CryptoKey auto-unlocks after cookie session restoration', async () => {
+  const fixture = await createVaultFixture();
+  const backend = createMemoryVaultKeyBackend();
+  await backend.put({
+    id: 'current',
+    vaultId: fixture.session.vaultId,
+    configId: JSON.stringify([fixture.config.version, fixture.config.vaultSalt, fixture.config.kdf,
+      fixture.config.iterations, fixture.config.cipher, fixture.config.keyCheck]),
+    key: fixture.key
+  });
+  const raw = { ...note(A), title: await fixture.encrypt('自动标题'), content: await fixture.encrypt('自动正文') };
+  const app = await loadApp({ vaultBackend: backend, fetch: restoreHandler(fixture, [raw]) });
+  await app.boot;
+
+  assert.equal(app.run('state.sessionAuthenticated'), true);
+  assert.equal(app.run('state.vaultUnlocked'), true);
+  assert.equal(app.run('state.authView'), 'app');
+  assert.equal(app.run('state.allNotes.length'), 1);
+  assert.equal(app.elements.get('passwordInput').value, '');
+});
+
+test('a persisted key is not auto-restored when the server has no key check', async () => {
+  const fixture = await createVaultFixture();
+  fixture.config = { ...fixture.config, keyCheck: null };
+  const backend = createMemoryVaultKeyBackend();
+  await backend.put({
+    id: 'current',
+    vaultId: fixture.session.vaultId,
+    configId: JSON.stringify([fixture.config.version, fixture.config.vaultSalt, fixture.config.kdf,
+      fixture.config.iterations, fixture.config.cipher, fixture.config.keyCheck]),
+    key: fixture.key
+  });
+  const raw = { ...note(A), title: await fixture.encrypt('旧标题'), content: await fixture.encrypt('旧正文') };
+  const app = await loadApp({ vaultBackend: backend, fetch: restoreHandler(fixture, [raw]) });
+  await app.boot;
+
+  assert.equal(app.run('state.authView'), 'login');
+  assert.equal(app.run('state.vaultUnlocked'), false);
+  assert.equal(app.run('state.authMode'), 'recover');
+  assert.equal(app.calls.some(call => call.url.startsWith('/api/notes')), false);
+});
+
+test('active Safari bearer adopts a renewed same-origin response header for later requests', async () => {
+  const fixture = await createVaultFixture();
+  const renewedToken = 'renewed.in-memory.session';
+  const app = await readyApp({ fixture, fetch: () => new Response(JSON.stringify({ ok: true, notes: [], nextCursor: null }), {
+    headers: { 'content-type': 'application/json', 'x-session-token': renewedToken }
+  }) });
+
+  await app.run("api('/api/health')");
+  assert.equal(app.run('activeSession.token'), renewedToken);
+  await app.run("api('/api/notes?limit=10')");
+  assert.equal(app.calls[1].options.headers.get('authorization'), 'Bearer ' + renewedToken);
+});
+
+test('an anonymous browser checks the HttpOnly cookie and shows login', async () => {
   const empty = await loadApp();
   await empty.boot;
   assert.equal(empty.run('state.authView'), 'login');
-  assert.equal(empty.calls.length, 0);
-  const fixture = await createVaultFixture();
-  const expired = await loadApp({ record: { ...fixture.record, expiresAt: Date.now() - 1 } });
-  await expired.boot;
-  assert.equal(expired.run('state.authView'), 'login');
-  assert.equal(expired.hub.data.has(DEVICE_SESSION_KEY), false);
-  assert.equal(expired.calls.length, 0);
+  assert.equal(empty.calls.length, 1);
+  assert.equal(empty.calls[0].url, '/api/session');
+  assert.equal(empty.hub.data.size, 0);
 });
 
 test('session restoration transient errors keep the record and retry without flashing login', async () => {
   const fixture = await createVaultFixture();
   const handle = restoreHandler(fixture);
   let offline = true;
-  const app = await loadApp({ record: fixture.record, fetch: url => {
+  const app = await loadApp({ fetch: url => {
     if (offline) throw new Error('offline');
     return handle(url);
   } });
   await app.boot;
   assert.equal(app.run('state.authView'), 'restoring');
   assert.equal(loginWasShown(app), false);
-  assert.equal(app.hub.data.has(DEVICE_SESSION_KEY), true);
+  assert.equal(app.hub.data.size, 0);
   assert.equal(app.elements.get('retryLoadBtn').classList.contains('hidden'), false);
   assert.equal(app.elements.get('retryLoadBtn').disabled, false);
   offline = false;
@@ -84,17 +135,17 @@ test('session restoration transient errors keep the record and retry without fla
 
 test('a server-revoked remembered session is cleared and returns to login', async () => {
   const fixture = await createVaultFixture();
-  const app = await loadApp({ record: fixture.record, fetch: () => jsonResponse({ ok: true, authenticated: false }) });
+  const app = await loadApp({ fetch: () => jsonResponse({ ok: true, authenticated: false }) });
   await app.boot;
   assert.equal(app.run('state.authView'), 'login');
   assert.equal(app.run('activeSession'), null);
-  assert.equal(app.hub.data.has(DEVICE_SESSION_KEY), false);
+  assert.equal(app.hub.data.size, 0);
 });
 
 test('a remembered session is authenticated before the vault password is requested', async () => {
   const fixture = await createVaultFixture();
   const handle = restoreHandler(fixture);
-  const app = await loadApp({ record: fixture.record, fetch: handle });
+  const app = await loadApp({ fetch: handle });
   await app.boot;
   assert.equal(app.run('state.sessionAuthenticated'), true);
   assert.equal(app.run('state.authMode'), 'recover');
@@ -107,13 +158,13 @@ test('list loading errors remain inside the notes view and retry only the list',
   const fixture = await createVaultFixture();
   const handle = restoreHandler(fixture);
   let unavailable = true;
-  const app = await loadApp({ record: fixture.record, fetch: url => {
+  const app = await loadApp({ fetch: url => {
     if (unavailable && url.startsWith('/api/notes?')) return jsonResponse({ error: 'list unavailable' }, 500);
     return handle(url);
   } });
   await app.boot;
   app.run(`
-    activeSession = { token: 'test.signed.session', vaultId: 'default', expiresAt: Date.now() + 600000 };
+    activeSession = { vaultId: 'default' };
     state.sessionAuthenticated = true;
     state.vaultUnlocked = true;
     state.vaultKey = null;
@@ -136,7 +187,7 @@ test('list loading errors remain inside the notes view and retry only the list',
 test('logout invalidates a late restoration response', async () => {
   const fixture = await createVaultFixture();
   const pendingSession = deferred();
-  const app = await loadApp({ record: fixture.record, fetch: url => {
+  const app = await loadApp({ fetch: url => {
     if (url === '/api/session') return pendingSession.promise;
     if (url === '/api/logout') return jsonResponse({ ok: true });
     throw new Error('Restoration should have stopped');
@@ -148,6 +199,101 @@ test('logout invalidates a late restoration response', async () => {
   assert.equal(app.run('activeSession'), null);
   assert.equal(app.hub.data.size, 0);
   assert.equal(app.calls.find(call => call.url === '/api/logout').options.signal.aborted, false);
+});
+
+test('logout queues key clearing behind an in-flight persistence operation', async () => {
+  const fixture = await createVaultFixture();
+  let releaseSave;
+  const saveGate = new Promise(resolve => { releaseSave = resolve; });
+  let record = null;
+  const backend = {
+    async get() { return record; },
+    async put(value) { await saveGate; record = value; },
+    async delete() { record = null; }
+  };
+  const app = await readyApp({ fixture, vaultBackend: backend });
+  const saving = app.run('persistVaultKey(state.cryptoConfig, state.vaultKey, authGeneration)');
+  await Promise.resolve();
+  const logout = app.run('logout()');
+  releaseSave();
+  await Promise.all([saving, logout]);
+  assert.equal(record, null);
+});
+
+test('logout during persisted key loading cannot reopen the locked page', async () => {
+  const fixture = await createVaultFixture();
+  let loadResolve;
+  const loadStarted = deferred();
+  const persisted = {
+    id: 'current',
+    vaultId: fixture.session.vaultId,
+    configId: JSON.stringify([fixture.config.version, fixture.config.vaultSalt, fixture.config.kdf,
+      fixture.config.iterations, fixture.config.cipher, fixture.config.keyCheck]),
+    key: fixture.key
+  };
+  let record = persisted;
+  const backend = {
+    async get() { loadStarted.resolve(); return new Promise(resolve => { loadResolve = () => resolve(record); }); },
+    async put(value) { record = value; },
+    async delete() { record = null; }
+  };
+  const app = await loadApp({ fixture, vaultBackend: backend, fetch: restoreHandler(fixture) });
+  await loadStarted.promise;
+  const logout = app.run('logout()');
+  loadResolve();
+  await Promise.all([app.boot, logout]);
+  assert.equal(app.run('state.authView'), 'login');
+  assert.equal(app.run('state.vaultKey'), null);
+  assert.equal(app.run('state.vaultUnlocked'), false);
+  assert.equal(record, null);
+});
+
+test('unchecking remember disables auto-unlock and never restores the key in this flow', async () => {
+  const fixture = await createVaultFixture();
+  const backend = createMemoryVaultKeyBackend();
+  await backend.put({
+    id: 'current',
+    vaultId: fixture.session.vaultId,
+    configId: JSON.stringify([fixture.config.version, fixture.config.vaultSalt, fixture.config.kdf,
+      fixture.config.iterations, fixture.config.cipher, fixture.config.keyCheck]),
+    key: fixture.key
+  });
+  const app = await readyApp({ fixture, vaultBackend: backend });
+  app.run('els.rememberDevice.checked = false; state.vaultKey = null');
+  assert.equal(await app.run('restoreVaultKey(state.cryptoConfig)'), null);
+  assert.equal(app.run('state.autoUnlockDisabled'), true);
+});
+
+test('a failed key clear is visible and marks auto-unlock disabled', async () => {
+  const fixture = await createVaultFixture();
+  const backend = {
+    async get() { return null; },
+    async put() {},
+    async delete() { throw new Error('storage denied'); }
+  };
+  const app = await readyApp({ fixture, vaultBackend: backend });
+  app.run('els.rememberDevice.checked = false');
+  await app.run('persistVaultKey(state.cryptoConfig, state.vaultKey, authGeneration)');
+  assert.equal(app.run('state.autoUnlockDisabled'), true);
+  assert.match(app.elements.get('deviceStatus').textContent, /自动解锁已关闭/);
+  assert.equal(app.elements.get('deviceStatus').classList.contains('hidden'), false);
+});
+
+test('hung key storage falls back to the password unlock screen', async () => {
+  const fixture = await createVaultFixture();
+  const backend = {
+    get() { return new Promise(() => {}); },
+    async put() {},
+    async delete() {}
+  };
+  const app = await loadApp({ fixture, vaultBackend: backend, vaultTimeoutMs: 10, fetch: restoreHandler(fixture) });
+  const settled = await Promise.race([
+    app.boot.then(() => true),
+    new Promise(resolve => setTimeout(() => resolve(false), 100))
+  ]);
+  assert.equal(settled, true, 'startup must not remain in restoring');
+  assert.equal(app.run('state.authView'), 'login');
+  assert.equal(app.run('state.authMode'), 'recover');
 });
 
 test('saving locks the editor and keeps the original note and revision across awaits', async () => {
